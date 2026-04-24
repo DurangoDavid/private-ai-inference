@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/cover/vast-coding-llm-avatar.png" alt="Vast Coding LLM" width="900">
+</p>
+
 # Vast Coding LLM
 
 Terraform setup for renting a Vast.ai GPU instance and serving an OpenAI-compatible coding model with vLLM.
