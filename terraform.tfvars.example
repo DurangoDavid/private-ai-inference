@@ -1,0 +1,24 @@
+enable_provisioning    = false
+deployment_name        = "vast-coding-llm"
+selected_model_profile = "qwen3_coder_30b_fp8"
+
+# Keep this at 1 for the first POC. Set to null only when ready to calculate
+# capacity against target_concurrency and rent many replicas.
+replica_count_override = 1
+target_concurrency     = 500
+
+# Change before provisioning. This is the key developers/tools use against vLLM.
+inference_api_key = "replace-with-a-long-random-key"
+
+market_type            = "on-demand"
+max_dollars_per_hour   = 20
+min_reliability        = 0.99
+secure_datacenter_only = true
+disk_gb                = 250
+docker_image           = "vllm/vllm-openai:latest"
+
+# Optional model profile examples:
+# selected_model_profile = "glm_5_fp8"
+# selected_model_profile = "glm_4_7_fp8"
+# selected_model_profile = "deepseek_v3_2_exp"
+# selected_model_profile = "kimi_k2_thinking"
