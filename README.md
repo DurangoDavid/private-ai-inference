@@ -51,11 +51,11 @@ Starting vLLM for Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8
 
 ## Quick Start
 
-Create `.env`:
+Create `.env` from `.env.example`:
 
 ```bash
-export VAST_API_KEY="..."
-export TF_VAR_inference_api_key="change-this"
+cp .env.example .env
+# then edit .env with your real keys
 ```
 
 Deploy:
