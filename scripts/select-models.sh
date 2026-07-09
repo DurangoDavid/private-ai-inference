@@ -26,7 +26,8 @@ CATALOG=(
   # image
   "x_z_image_turbo|x/z-image-turbo:latest|0|4|image_generation"
 )
-MIN_VRAM_FLOOR=16
+MIN_VRAM_FLOOR=48
+MIN_VRAM_CEILING=250
 
 slug_of()      { printf '%s' "${1%%|*}"; }
 rest_of()      { s="${1#|}"; printf '%s' "${s}"; }   # not used directly
@@ -92,21 +93,25 @@ if [[ "${1:-}" == "--models" ]]; then
     done
   fi
 else
-  echo "private-ai-inference — select fleet models to co-host on one Vast.ai box"
-  echo "VRAM is sized to 1.25x the largest selected LOCAL model; :cloud models"
-  echo "are pulled but excluded from VRAM sizing (served from Ollama cloud)."
-  echo "SSD=200GB, RAM=150GB are fixed."
-  echo
+  # Interactive UI goes to STDERR so a caller capturing stdout (run.sh:
+  # `sel_out="$(scripts/select-models.sh)"`) still sees the menu live and only
+  # captures the machine-readable SELECTED: line at the end. Printing the menu
+  # to stdout would swallow it into the variable -> "nothing happens" + a hang.
+  echo "private-ai-inference — select fleet models to co-host on one Vast.ai box" >&2
+  echo "VRAM is sized to 1.25x the largest selected LOCAL model; :cloud models" >&2
+  echo "are pulled but excluded from VRAM sizing (served from Ollama cloud)." >&2
+  echo "SSD=200GB, RAM=150GB are fixed." >&2
+  echo >&2
   i=1
   for entry in "${CATALOG[@]}"; do
     slug="$(field "$entry" 1)"; name="$(field "$entry" 2)"; cloud="$(field "$entry" 3)"
     weight="$(field "$entry" 4)"; role="$(field "$entry" 5)"
     tag="local"; [[ "$cloud" == "1" ]] && tag=":cloud"; [[ "$role" == image_* ]] && tag="image"
-    printf '%2d) %-22s %-32s %2sGB  %-16s [%s]\n' "$i" "$slug" "$name" "$weight" "$role" "$tag"
+    printf '%2d) %-22s %-32s %2sGB  %-16s [%s]\n' "$i" "$slug" "$name" "$weight" "$role" "$tag" >&2
     i=$((i+1))
   done
-  echo
-  echo "Enter the numbers to co-host, comma-separated (e.g. 1,3,8), or 'all':"
+  echo >&2
+  echo "Enter the numbers to co-host, comma-separated (e.g. 1,3,8), or 'all':" >&2
   read -r ans
   if [[ -z "$ans" ]]; then echo "No selection." >&2; exit 1; fi
   if [[ "$ans" == "all" ]]; then
@@ -144,22 +149,24 @@ for s in "${uniq[@]}"; do
   fi
 done
 
-min_vram=$(awk -v w="$largest_local" -v f="$MIN_VRAM_FLOOR" 'BEGIN{ v=int((w*1.25)+0.999999); if (v<f) v=f; printf "%d", v }')
+min_vram=$(awk -v w="$largest_local" -v f="$MIN_VRAM_FLOOR" -v c="$MIN_VRAM_CEILING" 'BEGIN{ v=int((w*1.25)+0.999999); if (v<f) v=f; if (v>c) v=c; printf "%d", v }')
 
-echo
-echo "Selected:"
+# Human-readable summary -> stderr (see note above); only the SELECTED: line
+# below goes to stdout for the caller to capture.
+echo >&2
+echo "Selected:" >&2
 for s in "${uniq[@]}"; do
   flag="local"; [[ "$(cloud_of "$s")" == "1" ]] && flag=":cloud"
   [[ "$(role_of "$s")" == image_* ]] && flag="image"
-  printf '  - %-22s %s  (%s)\n' "$s" "$(ollama_of "$s")" "$flag"
+  printf '  - %-22s %s  (%s)\n' "$s" "$(ollama_of "$s")" "$flag" >&2
 done
-echo
-echo "Largest local model weight: ${largest_local}GB"
-echo "Min VRAM (1.25x largest local, floored at ${MIN_VRAM_FLOOR}): ${min_vram}GB"
-echo "SSD: 200GB (fixed)   RAM: 150GB (fixed)"
+echo >&2
+echo "Largest local model weight: ${largest_local}GB" >&2
+echo "Min VRAM (1.25x largest local, floored at ${MIN_VRAM_FLOOR}GB, capped at ${MIN_VRAM_CEILING}GB): ${min_vram}GB" >&2
+echo "SSD: 200GB (fixed)   RAM: 150GB (fixed)" >&2
 if [[ ${#cloud_models[@]} -gt 0 ]]; then
-  echo "Cloud models present: after the box boots, SSH in once and run 'ollama signin',"
-  echo "  then 'ollama pull <cloud-model>' for each."
+  echo "Cloud models present: after the box boots, SSH in once and run 'ollama signin'," >&2
+  echo "  then 'ollama pull <cloud-model>' for each." >&2
 fi
 
 # Machine-readable line for deploy.sh (LOCAL = local-model ollama names to wait

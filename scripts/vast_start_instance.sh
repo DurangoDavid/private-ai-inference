@@ -30,15 +30,40 @@ export VAST_API_KEY="${VAST_API_KEY:?VAST_API_KEY must be exported (see .env)}"
 echo ">>> starting instance ${instance_id} (PUT /api/v0/instances/${instance_id}/ state=running)..." >&2
 resp="$(mktemp)"
 trap 'rm -f "$resp"' EXIT
-curl -fsS --request PUT \
+# Drop -f: Vast returns HTTP 200 with success:false for a QUEUED start, and we
+# need the body to tell a queue apart from a real rejection. Without -f, curl
+# always exits 0 on any HTTP response, so we classify from the JSON below.
+curl -sS --request PUT \
   --url "${vast_api_url%/}/api/v0/instances/${instance_id}/" \
   --header "Authorization: Bearer ${VAST_API_KEY}" \
   --header "Content-Type: application/json" \
   --data '{"state":"running"}' > "$resp"
-if [[ "$(jq -r '.success // false' "$resp")" != "true" ]]; then
-  echo "Start request rejected: $(jq -c '{error:.error, msg:.msg}' "$resp" 2>/dev/null || cat "$resp")" >&2
-  exit 1
+success="$(jq -r '.success // false' "$resp" 2>/dev/null || echo false)"
+err="$(jq -r '.error // empty' "$resp" 2>/dev/null || true)"
+msg="$(jq -r '.msg // empty' "$resp" 2>/dev/null || true)"
+
+# A queued start: Vast accepted the state change but the host GPU isn't free
+# right now ("resources_unavailable" / "...state change queued"). This is NOT a
+# rejection — the box will start when a GPU frees up, so fall through to the
+# poll loop with a longer timeout + a relaxed trap window instead of bailing and
+# telling the user to destroy+re-rent a box that's merely waiting in queue.
+queued=0
+if [[ "$success" != "true" ]]; then
+  if [[ "$err" == "resources_unavailable" || "$msg" == *"queued"* ]]; then
+    queued=1
+    echo ">>> start queued by Vast (host GPU busy); will start when a GPU frees up. (${err}: ${msg})" >&2
+  else
+    echo "Start request rejected: $(jq -c '{error:.error, msg:.msg}' "$resp" 2>/dev/null || cat "$resp")" >&2
+    exit 1
+  fi
 fi
 
 echo ">>> waiting for instance ${instance_id} to reach 'running'..." >&2
-exec scripts/vast_instance_info.sh --instance-id "$instance_id" --vast-api-url "$vast_api_url" --timeout "$timeout_sec"
+poll_args=(--instance-id "$instance_id" --vast-api-url "$vast_api_url")
+if [[ "$queued" -eq 1 ]]; then
+  # A queued start can wait several minutes for a GPU; relax the poll window.
+  poll_args+=(--queued --timeout 1800)
+else
+  poll_args+=(--timeout "$timeout_sec")
+fi
+exec scripts/vast_instance_info.sh "${poll_args[@]}"

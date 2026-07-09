@@ -34,12 +34,14 @@ names Vast.ai as the example host). Swap the box by re-running the deploy.
 You pick which fleet models to co-host (the list comes from the Hub fleet —
 see `locals.tf` `model_catalog`). Provisioning is then:
 
-- **min VRAM = 1.25 × the weight GB of the largest selected *local* model**
-  (25% headroom for KV cache + activation). `:cloud` models are excluded from
-  sizing — they're served from Ollama cloud with ~0 local VRAM.
+- **min VRAM = clamp(1.25 × the weight GB of the largest selected *local* model,
+  floor 48 GB, ceiling 250 GB)** (25% headroom for KV cache + activation).
+  `:cloud` models are excluded from sizing — they're served from Ollama cloud
+  with ~0 local VRAM.
 - **SSD = 200 GB** and **RAM = 150 GB**, fixed.
-- A `min_vram_floor_gb` (default 16) keeps a cloud-only selection honest so it
-  still rents a real GPU box.
+- `min_vram_floor_gb` (default 48) raises the sizing so even a cloud-only
+  selection rents a real GPU box; `max_vram_ceiling_gb` (default 250) caps it so
+  a huge local model can't request an impossible single-GPU box.
 
 The fleet catalog (`locals.tf`) is the alignment seam between this provisioner
 and the Hub app: add/remove a model here + pull it on the box, no app code

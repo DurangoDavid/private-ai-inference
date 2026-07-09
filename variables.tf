@@ -11,9 +11,15 @@ variable "selected_models" {
 }
 
 variable "min_vram_floor_gb" {
-  description = "Minimum VRAM floor (GB) so a cloud-only selection still rents a real GPU box."
+  description = "Minimum VRAM floor (GB). The 1.25x-largest-local sizing is raised to this floor, so even a cloud-only selection rents a real GPU box. Default 48 GB (RTX PRO 6000 WS / A100 80GB tier)."
   type        = number
-  default     = 16
+  default     = 48
+}
+
+variable "max_vram_ceiling_gb" {
+  description = "Maximum VRAM ceiling (GB). The 1.25x-largest-local sizing (after the floor) is capped at this, so a huge local model can't request an impossible single-GPU box. Default 250 GB."
+  type        = number
+  default     = 250
 }
 
 variable "num_gpus" {

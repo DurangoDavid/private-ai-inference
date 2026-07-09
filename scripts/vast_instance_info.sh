@@ -15,6 +15,8 @@ vast_api_url="https://console.vast.ai"
 state_dir=""
 instance_id=""
 timeout_sec=900 # 15 min default
+queued=0        # --queued: start was queued by Vast (resources_unavailable); a
+               # long 'exited' wait is expected, NOT a trap.
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -22,6 +24,7 @@ while [[ $# -gt 0 ]]; do
     --instance-id) instance_id="$2"; shift 2 ;;
     --vast-api-url) vast_api_url="$2"; shift 2 ;;
     --timeout) timeout_sec="$2"; shift 2 ;;
+    --queued) queued=1; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -66,6 +69,11 @@ info=""
 # 'loading'); 'offline'/'unknown' are never healthy and fail fast.
 trap_grace_exited=120   # sec stuck in 'exited' after we asked it to run
 trap_grace_other=30     # sec stuck in 'offline'/'unknown'
+# A queued start (resources_unavailable) legitimately sits in 'exited' while
+# Vast waits for a GPU to free up — that is NOT a trap. Extend the 'exited'
+# grace to the full deadline so we don't tell the user to destroy+re-rent a box
+# that's merely queued. 'offline'/'unknown' still fail fast regardless.
+[[ "$queued" -eq 1 ]] && trap_grace_exited="$timeout_sec"
 stuck_state=""; stuck_since=0
 while true; do
   raw="$(scripts/vast_list_instances_json.sh --id "$instance_id" 2>/dev/null || true)"
@@ -117,6 +125,10 @@ while true; do
   fi
   if [[ $(date +%s) -ge $deadline ]]; then
     echo "Timed out waiting for instance ${instance_id} to reach 'running' with an ssh port (${timeout_sec}s)." >&2
+    if [[ "$queued" -eq 1 ]]; then
+      echo "The start was queued (host GPU was busy) and no GPU freed up in time." >&2
+      echo "Re-run the connect/deploy in a few minutes — the queued start may still take, or destroy+re-rent if the host is permanently full." >&2
+    fi
     [[ -n "$info" && -n "$info_file" ]] && printf '%s\n' "$info" > "$info_file"
     exit 1
   fi

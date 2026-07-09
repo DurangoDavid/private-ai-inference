@@ -12,11 +12,14 @@ deployment_name     = "private-ai-inference"
 # :cloud models are pulled but excluded from VRAM sizing (served from Ollama cloud).
 selected_models = ["qwen3_6_35b", "gemma3_27b", "nomic_embed"]
 
-# Sizing. min_vram_floor_gb lets a cloud-only selection still rent a real GPU.
-disk_gb           = 200
-ram_gb            = 150
-num_gpus          = 1
-min_vram_floor_gb = 16
+# Sizing. min_vram_floor_gb raises the 1.25x-largest-local sizing to a floor;
+# max_vram_ceiling_gb caps it so a huge local model can't request an impossible
+# single-GPU box. min VRAM = clamp(1.25x largest local, floor, ceiling).
+disk_gb             = 200
+ram_gb              = 150
+num_gpus            = 1
+min_vram_floor_gb   = 48
+max_vram_ceiling_gb = 250
 
 market_type            = "ondemand"
 max_dollars_per_hour   = 20

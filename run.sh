@@ -157,8 +157,10 @@ fi
 # ---- 2/3. pick models + show 1.25x sizing ----
 echo
 echo "=== pick which fleet models to co-host ==="
+# select-models.sh prints its menu + sizing summary to STDERR (so it shows live
+# here) and emits only the machine-readable SELECTED: line to stdout, which we
+# capture. Don't echo sel_out back — it's just the machine line.
 sel_out="$(scripts/select-models.sh)"
-echo "$sel_out"
 line="$(printf '%s\n' "$sel_out" | grep '^SELECTED:')"
 joined="${line#SELECTED:}"; joined="${joined%% *}"
 [[ -z "$joined" ]] && { echo "No models selected." >&2; exit 1; }

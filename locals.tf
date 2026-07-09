@@ -97,7 +97,8 @@ locals {
   }
 
   # ----- selection + sizing (README1.md spec) -----
-  # min VRAM = 1.25 × the weight GB of the LARGEST selected LOCAL model.
+  # min VRAM = clamp(1.25 × the weight GB of the LARGEST selected LOCAL model,
+  #                  floor=var.min_vram_floor_gb, ceiling=var.max_vram_ceiling_gb).
   # :cloud models are excluded (served from Ollama cloud, ~0 local VRAM).
   # SSD is fixed at var.disk_gb (200), RAM at var.ram_gb (150).
   selected_set      = toset(var.selected_models)
@@ -106,7 +107,8 @@ locals {
   local_weight_list = [for v in local.local_selected : v.weight_gb]
   largest_local_gb  = length(local.local_weight_list) > 0 ? max(local.local_weight_list...) : 0
   raw_min_vram_gb   = 1.25 * local.largest_local_gb
-  min_vram_gb       = max(ceil(local.raw_min_vram_gb), var.min_vram_floor_gb)
+  floored_min_vram_gb = max(ceil(local.raw_min_vram_gb), var.min_vram_floor_gb)
+  min_vram_gb       = min(local.floored_min_vram_gb, var.max_vram_ceiling_gb)
   min_gpu_ram_mb    = local.min_vram_gb * 1024
   num_gpus          = var.num_gpus # Ollama swaps models; no tensor-parallel sizing needed
 
