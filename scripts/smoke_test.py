@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+"""Ollama smoke test through the CPU-side tunnel.
+
+Hits the Ollama /api endpoints (NOT OpenAI /v1): checks /api/tags for the
+expected models and runs a /api/generate smoke call. The Local LLM Hub CPU VM
+speaks the Ollama /api protocol, so this mirrors what the app actually does.
+
+  python3 scripts/smoke_test.py --base-url http://127.0.0.1:11434 --model qwen3.6:35b
+"""
 import argparse
 import json
 import sys
@@ -8,44 +16,57 @@ import urllib.request
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", required=True, help="OpenAI-compatible base URL, e.g. http://host:port/v1")
-    parser.add_argument("--api-key", required=True)
-    parser.add_argument("--model", required=True)
+    parser.add_argument(
+        "--base-url", required=True, help="Ollama base URL, e.g. http://127.0.0.1:11434"
+    )
+    parser.add_argument("--model", required=True, help="Ollama model id to generate with")
     args = parser.parse_args()
 
+    base = args.base_url.rstrip("/")
+
+    # 1. /api/tags — model presence.
+    try:
+        with urllib.request.urlopen(base + "/api/tags", timeout=30) as response:
+            tags = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"/api/tags FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    names = [m.get("name") for m in tags.get("models", [])]
+    print("Models on the box: " + (", ".join(names) if names else "(none)"))
+    if args.model not in names:
+        print(
+            f"Smoke test FAILED: model {args.model!r} not present in /api/tags.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # 2. /api/generate — a tiny generation.
     payload = {
         "model": args.model,
-        "messages": [
-            {
-                "role": "user",
-                "content": "Write a small Python function named add that returns the sum of two numbers. Return only code.",
-            }
-        ],
-        "temperature": 0.2,
-        "max_tokens": 256,
+        "prompt": "Reply with the single word OK.",
+        "stream": False,
+        "options": {"temperature": 0.0},
     }
     request = urllib.request.Request(
-        args.base_url.rstrip("/") + "/chat/completions",
+        base + "/api/generate",
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {args.api_key}",
-            "Content-Type": "application/json",
-        },
+        headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        print(exc.read().decode("utf-8", errors="replace"), file=sys.stderr)
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"/api/generate FAILED: {exc}", file=sys.stderr)
         return 1
 
-    content = data["choices"][0]["message"].get("content") or ""
-    print(content)
-
-    if "def add" not in content:
-        print("Smoke test failed: response did not include expected function.", file=sys.stderr)
+    content = (data.get("response") or "").strip()
+    print(f"generate response: {content[:200]}")
+    if not content:
+        print("Smoke test FAILED: empty generation.", file=sys.stderr)
         return 1
+    print("Smoke test OK.")
     return 0
 
 

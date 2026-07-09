@@ -8,3 +8,8 @@ __pycache__/
 .pytest_cache/
 .aider*
 .codex
+
+# SSH deploy keys (read-only GitHub keys shipped to the box at runtime — never commit)
+*_deploy_ed25519
+*_deploy_ed25519.pub
+*.pem

@@ -4,57 +4,57 @@ variable "enable_provisioning" {
   default     = false
 }
 
-variable "selected_model_profile" {
-  description = "Model profile key from local.model_profiles."
-  type        = string
-  default     = "qwen3_coder_30b_fp8"
+variable "selected_models" {
+  description = "Fleet models to co-host on one Vast.ai box. Keys of local.model_catalog. VRAM is sized to 1.25x the largest selected LOCAL model; :cloud models are pulled but excluded from sizing."
+  type        = list(string)
+  default     = ["qwen3_6_35b"]
 }
 
-variable "target_concurrency" {
-  description = "Target active concurrent developers used for sizing calculations."
+variable "min_vram_floor_gb" {
+  description = "Minimum VRAM floor (GB) so a cloud-only selection still rents a real GPU box."
   type        = number
-  default     = 500
-
-  validation {
-    condition     = var.target_concurrency > 0
-    error_message = "target_concurrency must be positive."
-  }
+  default     = 16
 }
 
-variable "replica_count_override" {
-  description = "Set to a number for a bounded POC. Set to null to calculate replicas from target_concurrency."
+variable "num_gpus" {
+  description = "Minimum number of GPUs on the Vast.ai offer. Ollama swaps models, so 1 is the default; raise for very large local models."
   type        = number
   default     = 1
-  nullable    = true
+}
 
-  validation {
-    condition     = var.replica_count_override == null || var.replica_count_override > 0
-    error_message = "replica_count_override must be null or positive."
-  }
+variable "default_gpu_names" {
+  description = "Broad GPU offer list used when no selected model declares preferred gpu_names."
+  type        = list(string)
+  default = [
+    "A100 SXM4", "A100 PCIe", "A100",
+    "H100 SXM", "H100 PCIe", "H100",
+    "H200", "H200 NVL",
+    "RTX PRO 6000 WS",
+  ]
+}
+
+variable "ram_gb" {
+  description = "Host RAM (GB) to require on the Vast.ai offer. Fixed provision per spec (150)."
+  type        = number
+  default     = 150
+}
+
+variable "disk_gb" {
+  description = "Container disk size (GB) on the Vast.ai offer. Fixed provision per spec (200)."
+  type        = number
+  default     = 200
 }
 
 variable "deployment_name" {
   description = "Name prefix for Vast.ai labels and generated files."
   type        = string
-  default     = "vast-coding-llm"
+  default     = "private-ai-inference"
 }
 
 variable "state_dir" {
   description = "Local runtime state directory for generated payloads and Vast.ai create responses."
   type        = string
   default     = ".terraform-poc-state"
-}
-
-variable "inference_api_key" {
-  description = "API key enforced by vLLM. Use a non-default value before provisioning."
-  type        = string
-  default     = "change-me"
-  sensitive   = true
-
-  validation {
-    condition     = length(var.inference_api_key) >= 8
-    error_message = "inference_api_key must be at least 8 characters."
-  }
 }
 
 variable "vast_api_url" {
@@ -64,13 +64,13 @@ variable "vast_api_url" {
 }
 
 variable "market_type" {
-  description = "Vast.ai market type."
+  description = "Vast.ai offer market type. The /api/v0/bundles/ search `type` enum is ondemand (fixed on-demand rates, default), bid (interruptible/spot — cheapest, may be preempted), reserved (reserved pricing)."
   type        = string
-  default     = "on-demand"
+  default     = "ondemand"
 
   validation {
-    condition     = contains(["on-demand", "reserved", "bid"], var.market_type)
-    error_message = "market_type must be one of on-demand, reserved, or bid."
+    condition     = contains(["ondemand", "bid", "reserved"], var.market_type)
+    error_message = "market_type must be one of ondemand, bid, or reserved (the Vast.ai API enum values)."
   }
 }
 
@@ -98,26 +98,26 @@ variable "offer_limit" {
   default     = 20
 }
 
-variable "disk_gb" {
-  description = "Container disk size in GB."
-  type        = number
-  default     = 250
-}
-
-variable "gpu_memory_utilization" {
-  description = "vLLM GPU memory utilization."
-  type        = number
-  default     = 0.90
-}
-
 variable "docker_image" {
-  description = "Docker image used for inference containers."
+  description = "Docker image the Vast.ai instance runs when use_ollama_template=false. A CUDA base so the GPU is usable and the Ollama install script runs; Ollama is installed by the onstart script, not the image."
   type        = string
-  default     = "vllm/vllm-openai:latest"
+  default     = "nvidia/cuda:12.4.1-base-ubuntu22.04"
 }
 
-variable "extra_vllm_args" {
-  description = "Extra vLLM arguments appended to the generated serve command."
-  type        = list(string)
-  default     = []
+variable "use_ollama_template" {
+  description = "When true (default), rent from the official Vast.ai Ollama template — Ollama is preinstalled, so onstart skips the install and only serves + pulls. When false, rent a bare CUDA image and install Ollama from scratch in the onstart."
+  type        = bool
+  default     = true
+}
+
+variable "ollama_template_image" {
+  description = "Docker image to match in /api/v0/template/ when use_ollama_template=true. The matching template's hash_id is sent to /api/v0/asks/. Default is the official Ollama image."
+  type        = string
+  default     = "ollama/ollama"
+}
+
+variable "model_repo_url" {
+  description = "Optional git URL of an external repo that loads models onto the box (deployed after boot by scripts/deploy-model-repo.sh). When set, the onstart defers model pulling to this repo instead of running `ollama pull` itself. Leave empty to pull the selected models directly in the onstart."
+  type        = string
+  default     = ""
 }

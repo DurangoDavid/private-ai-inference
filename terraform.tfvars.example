@@ -1,24 +1,41 @@
-enable_provisioning    = false
-deployment_name        = "vast-coding-llm"
-selected_model_profile = "qwen3_coder_30b_fp8"
+# ---------------------------------------------------------------------------
+# private-ai-inference — Vast.ai Ollama GPU backend for the Local LLM Hub CPU VM
+# ---------------------------------------------------------------------------
+# The interactive flow is `scripts/deploy.sh`; these vars are for direct
+# `terraform apply` use. VRAM is sized to 1.25x the largest selected LOCAL
+# model; SSD=200GB and RAM=150GB are fixed per spec.
 
-# Keep this at 1 for the first POC. Set to null only when ready to calculate
-# capacity against target_concurrency and rent many replicas.
-replica_count_override = 1
-target_concurrency     = 500
+enable_provisioning = true
+deployment_name     = "private-ai-inference"
 
-# Change before provisioning. This is the key developers/tools use against vLLM.
-inference_api_key = "replace-with-a-long-random-key"
+# Fleet models to co-host (keys of local.model_catalog in locals.tf).
+# :cloud models are pulled but excluded from VRAM sizing (served from Ollama cloud).
+selected_models = ["qwen3_6_35b", "gemma3_27b", "nomic_embed"]
 
-market_type            = "on-demand"
+# Sizing. min_vram_floor_gb lets a cloud-only selection still rent a real GPU.
+disk_gb           = 200
+ram_gb            = 150
+num_gpus          = 1
+min_vram_floor_gb = 16
+
+market_type            = "ondemand"
 max_dollars_per_hour   = 20
 min_reliability        = 0.99
 secure_datacenter_only = true
-disk_gb                = 250
-docker_image           = "vllm/vllm-openai:latest"
 
-# Optional model profile examples:
-# selected_model_profile = "glm_5_fp8"
-# selected_model_profile = "glm_4_7_fp8"
-# selected_model_profile = "deepseek_v3_2_exp"
-# selected_model_profile = "kimi_k2_thinking"
+# Provisioning mode. Default: rent the cheapest offer that has an Ollama
+# template (Ollama preinstalled); onstart only serves + pulls. Set
+# use_ollama_template = false to rent a bare CUDA image and install Ollama from
+# scratch in the onstart (docker_image then applies).
+use_ollama_template    = true
+ollama_template_image  = "ollama/ollama"
+docker_image           = "nvidia/cuda:12.4.1-base-ubuntu22.04"
+
+# Optional: defer model pulling to an external repo (cloned onto the box after
+# boot by scripts/deploy.sh --model-repo). Leave empty to pull the selected
+# models directly in the onstart.
+# model_repo_url = "git@github.com:you/ollama-models.git"
+
+# Other catalog examples:
+# selected_models = ["qwen3_6_35b"]
+# selected_models = ["mistral_large_3_675b", "deepseek_v4_pro_cloud"]   # cloud-only -> floor VRAM

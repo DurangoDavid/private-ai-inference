@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Vast.ai containers have no systemd — run `ollama serve` directly, loopback only.
+# The CPU VM reaches this box over an SSH tunnel (autossh -L 0.0.0.0:11434 ->
+# 127.0.0.1:11434), mirroring README1.md's "binds 127.0.0.1:11434, refuses 0.0.0.0"
+# GPU-box posture. Never publish 11434 to the public internet.
+mkdir -p /workspace/logs
+export OLLAMA_HOST=127.0.0.1:11434
+
+%{ if skip_install ~}
+echo "Ollama preinstalled by the Vast.ai template; skipping install." | tee /workspace/logs/ollama.log
+%{ else ~}
+echo "Installing Ollama..." | tee /workspace/logs/ollama.log
+curl -fsSL https://ollama.com/install.sh | sh
+%{ endif ~}
+
+nohup ollama serve >> /workspace/logs/ollama.log 2>&1 &
+
+# Wait for the server to answer on loopback before pulling.
+for i in $(seq 1 60); do
+  curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
+  sleep 2
+done
+
+%{ if model_repo_url == "" ~}
+%{ for m in ollama_models ~}
+echo "pulling ${m}" | tee -a /workspace/logs/ollama.log
+# Local models pull now. :cloud models require `ollama signin` (a one-time
+# interactive device-code approval) and will fail here until that is done.
+ollama pull "${m}" 2>>/workspace/logs/ollama.log || \
+  echo "skipped/pending: ${m} (cloud models need 'ollama signin' first)" | tee -a /workspace/logs/ollama.log
+%{ endfor ~}
+%{ if has_cloud ~}
+echo "CLOUD MODELS SELECTED: SSH in once and run 'ollama signin', then 'ollama pull <cloud-model>' for each." | tee -a /workspace/logs/ollama.log
+%{ endif ~}
+%{ else ~}
+# Model loading is delegated to an external repo (var.model_repo_url), which
+# deploy.sh clones onto this box after boot via scripts/deploy-model-repo.sh.
+echo "MODEL LOADING DELEGATED to external repo: ${model_repo_url}" | tee -a /workspace/logs/ollama.log
+echo "Ollama is serving on 127.0.0.1:11434 with no models yet; the external repo will pull them." | tee -a /workspace/logs/ollama.log
+%{ endif ~}
+echo "Ollama ready on 127.0.0.1:11434 (loopback only; reach via SSH tunnel)" | tee -a /workspace/logs/ollama.log

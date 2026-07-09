@@ -44,17 +44,37 @@ variable "disk_gb" {
   type = number
 }
 
-variable "inference_api_key" {
-  type      = string
-  sensitive = true
+variable "ram_gb" {
+  description = "Host RAM (GB) to require on the Vast.ai offer (search filter cpu_ram)."
+  type        = number
 }
 
-variable "model_id" {
-  type = string
+variable "ollama_models" {
+  description = "Ollama model ids to pull on the box (local now, :cloud after `ollama signin`)."
+  type        = list(string)
 }
 
-variable "served_model_name" {
-  type = string
+variable "has_cloud" {
+  description = "True when any selected model is a :cloud model (drives the onstart signin note)."
+  type        = bool
+}
+
+variable "use_ollama_template" {
+  description = "When true, rent from the official Ollama template (Ollama preinstalled) via /api/v0/template/ + /api/v0/asks/. When false, use a bare CUDA image and install Ollama in the onstart."
+  type        = bool
+  default     = true
+}
+
+variable "ollama_template_image" {
+  description = "Docker image to match in /api/v0/template/ when use_ollama_template is true (e.g. ollama/ollama). The matching template's hash_id is sent to /api/v0/asks/."
+  type        = string
+  default     = "ollama/ollama"
+}
+
+variable "model_repo_url" {
+  description = "Optional git URL of an external repo that loads models onto the box (deployed after boot by scripts/deploy-model-repo.sh). When set, the onstart defers model pulling to this repo instead of running `ollama pull` itself."
+  type        = string
+  default     = ""
 }
 
 variable "gpu_names" {
@@ -67,20 +87,4 @@ variable "min_gpu_ram_mb" {
 
 variable "num_gpus" {
   type = number
-}
-
-variable "tensor_parallel_size" {
-  type = number
-}
-
-variable "max_model_len" {
-  type = number
-}
-
-variable "gpu_memory_utilization" {
-  type = number
-}
-
-variable "extra_vllm_args" {
-  type = list(string)
 }
