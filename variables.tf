@@ -40,9 +40,9 @@ variable "default_gpu_names" {
 }
 
 variable "ram_gb" {
-  description = "Host RAM (GB) to require on the Vast.ai offer. Fixed provision per spec (150)."
+  description = "Host RAM (GB) to require on the Vast.ai offer. Fixed provision per spec (40)."
   type        = number
-  default     = 150
+  default     = 40
 }
 
 variable "disk_gb" {

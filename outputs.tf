@@ -29,41 +29,35 @@ output "disk_gb" {
 }
 
 output "provisioning_enabled" {
-  description = "Whether this apply rents Vast.ai instances."
+  description = "Informational: the enable_provisioning var. Terraform is always render-only now (renting is done by scripts/deploy.sh, not terraform)."
   value       = var.enable_provisioning
 }
 
 output "node_state_dirs" {
-  description = "Local generated state directories (instance_id lives in <dir>/instance_id)."
-  value = var.enable_provisioning ? [
+  description = "Local rendered state directories (instance_id lives in <dir>/instance_id once deploy.sh rents)."
+  value = [
     for node in module.inference_node : node.node_state_dir
-    ] : [
-    for node in module.render_only_node : node.node_state_dir
   ]
 }
 
 output "node_names" {
-  description = "Node names — the --name for the rent/destroy scripts and the Vast instance label. (render-only name when enable_provisioning=false; deploy.sh reads this to rent outside terraform.)"
-  value = var.enable_provisioning ? [
+  description = "Node names — the --name for the rent/destroy scripts and the Vast instance label. deploy.sh reads this to rent outside terraform."
+  value = [
     for node in module.inference_node : node.name
-    ] : [
-    for node in module.render_only_node : node.name
   ]
 }
 
 output "node_template_images" {
   description = "Ollama template image per node (empty when use_ollama_template=false). deploy.sh passes this to vast_create_instance.sh."
-  value = var.enable_provisioning ? [
+  value = [
     for node in module.inference_node : node.template_image
-    ] : [
-    for node in module.render_only_node : node.template_image
   ]
 }
 
 output "tunnel_command" {
-  description = "Guidance: after `apply`, derive ip + ssh port from the instance, then run this to stand up the CPU-side tunnel. (IP/SSH port come from the Vast.ai API via scripts/vast_instance_info.sh, not a Terraform output, to avoid the provisioner/data-source race on first apply.)"
-  value = var.enable_provisioning && length(module.inference_node) > 0 ? format("%s\n%s",
+  description = "Guidance: after deploy.sh rents, derive ip + ssh port from the instance, then run this to stand up the CPU-side tunnel. (IP/SSH port come from the Vast.ai API via scripts/vast_instance_info.sh, not a Terraform output, to avoid the provisioner/data-source race.)"
+  value = length(module.inference_node) > 0 ? format("%s\n%s",
     "scripts/vast_instance_info.sh --state-dir '${module.inference_node[0].node_state_dir}'  # prints {public_ipaddr, ssh_host_port}",
     "scripts/setup-tunnel.sh <public_ipaddr> <ssh_host_port> <ssh-key-path>"
-  ) : "enable_provisioning=false; no instance to tunnel to."
+  ) : "no inference node; nothing to tunnel to."
 }

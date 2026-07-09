@@ -38,7 +38,7 @@ see `locals.tf` `model_catalog`). Provisioning is then:
   floor 48 GB, ceiling 250 GB)** (25% headroom for KV cache + activation).
   `:cloud` models are excluded from sizing — they're served from Ollama cloud
   with ~0 local VRAM.
-- **SSD = 200 GB** and **RAM = 150 GB**, fixed.
+- **SSD = 200 GB** and **RAM = 40 GB**, fixed.
 - `min_vram_floor_gb` (default 48) raises the sizing so even a cloud-only
   selection rents a real GPU box; `max_vram_ceiling_gb` (default 250) caps it so
   a huge local model can't request an impossible single-GPU box.
@@ -99,15 +99,29 @@ scripts/deploy.sh --model-repo https://github.com/DurangoDavid/private-ai-gpu.gi
 
 `deploy.sh` runs the full flow: (0) reuse an existing instance if `--prefer-existing`
 /`--reuse-instance` is given → (1) select + size → (2) a **render-only**
-`terraform apply` (`enable_provisioning=false` — writes the search/create
-payloads but rents nothing), then rents **directly in `deploy.sh`'s own TTY** so
-the confirm-before-spend gate can prompt an interactive `y/N` against the real
+`terraform apply` (writes the search/create payloads but rents nothing — there's
+no `null_resource`), then rents **directly in `deploy.sh`'s own TTY** so the
+confirm-before-spend gate can prompt an interactive `y/N` against the real
 cheapest offer (the rent no longer runs inside terraform's non-TTY
 `local-exec`, which could never prompt) → (3) wait for `running` + Ollama up →
 (4b) deploy your model repo if `--model-repo` is given → (5) wait for the
 selected local models in `/api/tags` → (6) stand up the SSH tunnel → (7) test
 through it (`/api/tags` + `/api/generate`). On success it prints the
 `OLLAMA_BASE_URL` to point the Hub CPU VM at.
+
+### Picking the box — cheapest-first, with browse
+
+The rent gate shows the **cheapest** matching offer and prompts `Rent this box
+now? [y/N] (b=browse all offers, q=quit)`. The default search keeps your soft
+prefs (secure datacenter, reliability ≥ 0.99, the `ram_gb` host-RAM floor) and
+relies on the **`gpu_ram` floor** (not a GPU-name whitelist) as the GPU
+constraint — so any 48 GB+ CUDA card qualifies, including cheap RTX 6000 Ada /
+RTX A6000 / L40 that a name whitelist used to hide. Answer **`b`** to drop the
+soft prefs (datacenter, reliability, host-RAM) and page through **every** box
+that still fits the models, sorted cheapest-first (10/page): pick one by number
+(`n`/`p` to page, `q` to bail). 24 GB cards stay excluded — they can't hold a
+22 GB model; that's the `gpu_ram` floor, not a missing option. If the curated
+cheapest is already fine, just answer `y`.
 
 Then on the Hub CPU VM (or same box), set:
 
@@ -172,29 +186,40 @@ no auth.
 
 ## Direct Terraform use (no orchestrator)
 
+Terraform is **render-only** — it never rents (no `null_resource`, no
+provisioner). It writes the Vast.ai search/create payloads + onstart into
+`.terraform-poc-state/<name>/` and stops. Renting is `scripts/deploy.sh`'s job
+(it calls `vast_create_instance.sh` in its own TTY so the confirm-before-spend
+gate can prompt). `enable_provisioning` is retained as an informational var only.
+
 ```bash
 source .env
 terraform init
 terraform apply \
   -var selected_models='["qwen3_6_35b","gemma3_27b","nomic_embed"]' \
-  -var enable_provisioning=true \
   -var use_ollama_template=true \
-  -var disk_gb=200 -var ram_gb=150
+  -var disk_gb=200 -var ram_gb=40
+# -> renders .terraform-poc-state/private-ai-inference-01/
+#      search_payload.json  (cpu_ram>=150GB(=153600MB), disk_space>=200GB, gpu_ram>=min_vramMB; NO gpu_name filter — gpu_ram floor is the constraint)
+#      create_payload.json  (template mode: env.OLLAMA_HOST=127.0.0.1:11434 + onstart)
+#      onstart-ollama.sh    (ollama serve loopback, the ollama pull lines / model-repo deferral, cloud-signin note)
 ```
 
-Inspect the rendered payloads without spending (no instance rented):
+Then rent (with the y/N spend gate) outside terraform:
 
 ```bash
-terraform apply -var enable_provisioning=false
-# then look at .terraform-poc-state/private-ai-inference-render-only/
-#   search_payload.json  (cpu_ram>=150, disk_space>=200, gpu_ram>=min_vram, gpu_name in union)
-#   create_payload.json  (template mode: env.OLLAMA_HOST=127.0.0.1:11434 + onstart; no image)
-#   onstart-ollama.sh    (ollama serve loopback, the ollama pull lines / model-repo deferral, cloud-signin note)
+scripts/vast_create_instance.sh \
+  --name "$(terraform output -json node_names | jq -r '.[0]')" \
+  --search-payload ".terraform-poc-state/private-ai-inference-01/search_payload.json" \
+  --create-payload ".terraform-poc-state/private-ai-inference-01/create_payload.json" \
+  --state-dir ".terraform-poc-state/private-ai-inference-01" \
+  --template-image ollama/ollama
+# (or just run scripts/deploy.sh, which does the render + rent in one go)
 ```
 
 Connectivity (IP + SSH host port) is surfaced by `scripts/vast_instance_info.sh`
 (it polls the Vast API until `running`), not a Terraform output, to avoid the
-provisioner/data-source race on first apply.
+provisioner/data-source race.
 
 ## Reuse an existing Vast.ai instance (dormant/active server)
 
@@ -262,8 +287,8 @@ terraform destroy -auto-approve -var enable_provisioning=false
 |------|---------|
 | `locals.tf` | Fleet catalog (`model_catalog`) + 1.25× sizing logic |
 | `variables.tf` | `selected_models` (multi-select), sizing + Vast search vars |
-| `main.tf` | One inference node (+ a render-only node when `enable_provisioning=false`) |
-| `modules/vast_inference_node/` | Vast search → create → destroy module (payload rendering + `null_resource` local-exec) |
+| `main.tf` | One render-only inference node (terraform never rents; `deploy.sh` rents in its own TTY) |
+| `modules/vast_inference_node/` | Vast search → create payload rendering (no `null_resource`; rent/destroy via `scripts/`) |
 | `templates/onstart-ollama.sh.tftpl` | Box onstart: serve Ollama loopback 11434, pull models or defer to `model_repo_url` |
 | `scripts/deploy.sh` | End-to-end CPU-VM runner (reuse-first → select → provision → wait → tunnel → test) |
 | `scripts/select-models.sh` | Interactive fleet picker + 1.25× sizing |

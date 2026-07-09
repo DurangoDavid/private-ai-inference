@@ -17,7 +17,11 @@ locals {
     cpu_ram           = { gte = var.ram_gb * 1024 }      # MB (Vast filters: disk_space=GB, cpu_ram/gpu_ram=MB)
     num_gpus          = { gte = var.num_gpus }
     gpu_ram           = { gte = var.min_gpu_ram_mb }
-    gpu_name          = { in = var.gpu_names }
+    # NOTE: no gpu_name whitelist. The gpu_ram floor is the real GPU constraint —
+    # any 48GB+ CUDA card fits the selected models, and a whitelist of only A100/
+    # H100/H200/RTX-PRO-6000-WS hid the cheap 48GB cards (RTX 6000 Ada, RTX A6000,
+    # L40) that can be a fraction of the price. var.gpu_names is kept (advisory,
+    # passed through) but NOT filtered on. To restrict to known GPUs, add it back.
     }, var.secure_datacenter_only ? {
     datacenter = { eq = true }
   } : {})
@@ -64,42 +68,11 @@ resource "local_sensitive_file" "onstart" {
   file_permission = "0700"
 }
 
-resource "null_resource" "instance" {
-  count = var.create_instance ? 1 : 0
-
-  triggers = {
-    name                 = var.name
-    node_state_dir       = local.node_state_dir
-    vast_api_url         = var.vast_api_url
-    search_payload_sha   = sha256(jsonencode(local.search_payload))
-    create_payload_sha   = sha256(jsonencode(local.create_payload))
-    create_payload_path  = local_sensitive_file.create_payload.filename
-    search_payload_path  = local_sensitive_file.search_payload.filename
-    use_ollama_template  = var.use_ollama_template
-    ollama_template_image = var.ollama_template_image
-    model_repo_url       = var.model_repo_url
-  }
-
-  provisioner "local-exec" {
-    command = join(" ", [
-      "${path.root}/scripts/vast_create_instance.sh",
-      "--name '${self.triggers.name}'",
-      "--vast-api-url '${self.triggers.vast_api_url}'",
-      "--search-payload '${self.triggers.search_payload_path}'",
-      "--create-payload '${self.triggers.create_payload_path}'",
-      "--state-dir '${self.triggers.node_state_dir}'",
-      var.use_ollama_template ? "--template-image '${var.ollama_template_image}'" : "",
-    ])
-  }
-
-  provisioner "local-exec" {
-    when    = destroy
-    command = "${path.root}/scripts/vast_destroy_instance.sh --name '${self.triggers.name}' --vast-api-url '${self.triggers.vast_api_url}' --state-dir '${self.triggers.node_state_dir}'"
-  }
-
-  depends_on = [
-    local_sensitive_file.create_payload,
-    local_sensitive_file.search_payload,
-    local_sensitive_file.onstart
-  ]
-}
+# NOTE: terraform is RENDER-ONLY. It writes search_payload.json / create_payload.json
+# / onstart-ollama.sh into node_state_dir and STOPS — it never rents and never
+# spends. Renting happens in scripts/deploy.sh, which calls vast_create_instance.sh
+# DIRECTLY (in its own TTY) so the confirm-before-spend gate can prompt y/N. There
+# is deliberately NO null_resource / local-exec here: a rent inside terraform's
+# provisioner has no TTY on stdin, so the gate could never prompt and every rent
+# aborted as "no spend". var.create_instance is retained for backward compat but
+# is now a no-op (no provisioner to gate).

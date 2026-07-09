@@ -100,7 +100,7 @@ locals {
   # min VRAM = clamp(1.25 × the weight GB of the LARGEST selected LOCAL model,
   #                  floor=var.min_vram_floor_gb, ceiling=var.max_vram_ceiling_gb).
   # :cloud models are excluded (served from Ollama cloud, ~0 local VRAM).
-  # SSD is fixed at var.disk_gb (200), RAM at var.ram_gb (150).
+  # SSD is fixed at var.disk_gb (200), RAM at var.ram_gb (40).
   selected_set      = toset(var.selected_models)
   selected_entries  = { for k, v in local.model_catalog : k => v if contains(local.selected_set, k) }
   local_selected    = { for k, v in local.selected_entries : k => v if !v.cloud }

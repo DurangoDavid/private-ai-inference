@@ -3,8 +3,10 @@
 # ---------------------------------------------------------------------------
 # The interactive flow is `scripts/deploy.sh`; these vars are for direct
 # `terraform apply` use. VRAM is sized to 1.25x the largest selected LOCAL
-# model; SSD=200GB and RAM=150GB are fixed per spec.
+# model; SSD=200GB and RAM=40GB are fixed per spec.
 
+# Informational only. Terraform is render-only now (no null_resource, no rent);
+# renting is done by scripts/deploy.sh in its own TTY (confirm-before-spend gate).
 enable_provisioning = true
 deployment_name     = "private-ai-inference"
 
@@ -16,7 +18,7 @@ selected_models = ["qwen3_6_35b", "gemma3_27b", "nomic_embed"]
 # max_vram_ceiling_gb caps it so a huge local model can't request an impossible
 # single-GPU box. min VRAM = clamp(1.25x largest local, floor, ceiling).
 disk_gb             = 200
-ram_gb              = 150
+ram_gb              = 40
 num_gpus            = 1
 min_vram_floor_gb   = 48
 max_vram_ceiling_gb = 250

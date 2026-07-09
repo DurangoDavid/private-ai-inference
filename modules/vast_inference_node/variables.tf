@@ -78,7 +78,8 @@ variable "model_repo_url" {
 }
 
 variable "gpu_names" {
-  type = list(string)
+  description = "Advisory only — NOT used as a search filter. The gpu_ram floor is the real GPU constraint (any 48GB+ CUDA card fits the models), so the cheapest card wins. A whitelist of only A100/H100/H200/RTX-PRO-6000-WS hid cheap 48GB cards (RTX 6000 Ada, RTX A6000, L40). To restrict to known GPUs, re-add a gpu_name filter in main.tf."
+  type        = list(string)
 }
 
 variable "min_gpu_ram_mb" {

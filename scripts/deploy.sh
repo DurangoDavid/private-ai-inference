@@ -161,11 +161,11 @@ if [[ -z "$selected_models" ]]; then echo "No models selected." >&2; exit 1; fi
 tf_list="[\"$(printf '%s' "$selected_models" | sed 's/,/","/g')\"]"
 
 # ---- 2. provision (render-only terraform, then rent in THIS process) ----
-# The terraform apply is RENDER-ONLY: enable_provisioning=false -> the
-# render_only_node materializes search_payload.json / create_payload.json /
-# onstart-ollama.sh into .terraform-poc-state/<name>/ but creates NO
-# null_resource, so it never rents and never spends. We then rent DIRECTLY here
-# (step 2b) by calling vast_create_instance.sh as a child of this script —
+# The terraform apply is RENDER-ONLY: the single inference node materializes
+# search_payload.json / create_payload.json / onstart-ollama.sh into
+# .terraform-poc-state/<name>/ and STOPS. There is NO null_resource and NO
+# local-exec, so terraform never rents and never spends. We then rent DIRECTLY
+# here (step 2b) by calling vast_create_instance.sh as a child of this script —
 # which inherits run.sh's TTY, so the confirm-before-spend gate can finally
 # prompt an interactive y/N against the real cheapest offer. (The old design
 # ran the rent inside terraform's local-exec provisioner, which has no TTY on
@@ -173,11 +173,11 @@ tf_list="[\"$(printf '%s' "$selected_models" | sed 's/,/","/g')\"]"
 if [[ $no_provision -eq 0 ]]; then
   mode_lbl="Ollama template (preinstalled)"
   [[ $use_template -eq 0 ]] && mode_lbl="bare CUDA image + onstart install"
-  echo ">>> 2/6 terraform init + render payloads (selected_models=${tf_list}, disk=200, ram=150, mode=${mode_lbl}, NO rent)"
+  echo ">>> 2/6 terraform init + render payloads (selected_models=${tf_list}, disk=200, ram=40, mode=${mode_lbl}, NO rent)"
   tf_vars=(
     -var "selected_models=${tf_list}"
     -var "disk_gb=200"
-    -var "ram_gb=150"
+    -var "ram_gb=40"
     -var "enable_provisioning=false"
     -var "use_ollama_template=$([[ $use_template -eq 1 ]] && echo true || echo false)"
     -var "model_repo_url=${model_repo}"

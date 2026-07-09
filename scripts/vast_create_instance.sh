@@ -189,50 +189,124 @@ fi
 
 printf '%s\n' "$offer_id" > "$offer_id_file"
 
+# ---- helpers: display offers in human units ----
+# Vast offer units (observed): gpu_ram = MB (per GPU), cpu_ram = MB, disk_space
+# = GB, dph_total = $/hr. The old gate mislabeled cpu_ram as "bytes"; it's MB.
+# Print one offer (json object) as the rent summary. $1=object json, $2=header
+show_offer() {
+  local o="$1" hdr="$2"
+  local gpu ngpu vram ram disk dph rel dc geo
+  gpu="$(printf '%s' "$o"  | jq -r '.gpu_name // "n/a"')"
+  ngpu="$(printf '%s' "$o" | jq -r '.num_gpus // "?"')"
+  vram="$(printf '%s' "$o" | jq -r '.gpu_ram  // 0' | awk '{printf "%.0f", $1/1024}')"
+  ram="$(printf '%s' "$o"  | jq -r '.cpu_ram  // 0' | awk '{printf "%.0f", $1/1024}')"
+  disk="$(printf '%s' "$o" | jq -r '.disk_space // "?"')"
+  dph="$(printf '%s' "$o"  | jq -r '.dph_total // 0' | awk '{printf "%.2f", $1}')"
+  rel="$(printf '%s' "$o"  | jq -r '.reliability // "?"')"
+  dc="$(printf '%s' "$o"   | jq -r '.datacenter // "n/a"')"
+  geo="$(printf '%s' "$o"  | jq -r '.geolocation // .country // "?"')"
+  echo "  ── ${hdr} ────────────────────────────────────────────────" >&2
+  printf '    GPU          : %s × %s  (%s GB VRAM)\n' "$ngpu" "$gpu" "$vram" >&2
+  printf '    host RAM     : %s GB\n' "$ram" >&2
+  printf '    disk         : %s GB\n' "$disk" >&2
+  printf '    $/hour (dph) : %s   reliability: %s   datacenter: %s   geo: %s\n' "$dph" "$rel" "$dc" "$geo" >&2
+}
+
+# Browse the whole suitable market, cheapest-first, paginated, and let the human
+# pick one by number. Relaxes the SOFT prefs (gpu_name whitelist [already gone
+# by default], datacenter, reliability, host-RAM floor) but KEEPS the load-bearing
+# gpu_ram/disk/num_gpus filters, so every listed box actually fits the models.
+# (24 GB cards are still excluded — they can't hold a 22 GB model; that's the
+# gpu_ram floor doing its job, not a missing option.) Sets $offer_id / $offer /
+# $offer_id_file to the pick; returns 1 on no-pick, 0 + prints confirmation.
+browse_and_pick() {
+  local broad broad_resp sorted total per page lo hi bn pick picked final pages
+  broad="$(printf '%s' "$base_payload" | jq -c 'del(.gpu_name, .datacenter, .reliability, .cpu_ram) | .limit = 200')"
+  echo "  Browsing the full suitable market — gpu_ram/disk/num_gpus kept," >&2
+  echo "  datacenter/reliability/host-RAM relaxed. Host RAM is shown per row;" >&2
+  echo "  pick one with RAM >= your largest model (~22 GB+) or the pull may fail." >&2
+  broad_resp="$state_dir/offers_browse.json"
+  search_offers "$broad" "$broad_resp"
+  bn="$(jq '(.offers // []) | length' "$broad_resp" 2>/dev/null || echo 0)"
+  if [[ "$bn" -eq 0 ]]; then
+    echo "  No offers even with the prefs relaxed; staying on the curated pick." >&2
+    return 1
+  fi
+  sorted="$state_dir/offers_sorted.json"
+  jq '[.offers[] | {id, gpu_name, num_gpus, gpu_ram, cpu_ram, disk_space, dph_total, reliability, datacenter, country:(.geolocation//.country//"?")}] | sort_by(.dph_total)' "$broad_resp" > "$sorted"
+  total="$(jq 'length' "$sorted")"
+  pages=$(( (total + 9) / 10 ))
+  echo "  ${total} offers, cheapest-first, 10 per page." >&2
+  per=10; page=0; picked=""
+  while true; do
+    lo=$((page*per)); hi=$((lo+per-1)); (( hi >= total )) && hi=$((total-1))
+    echo "  ── page $((page+1))/${pages} — offers #${lo+1}–#${hi+1} of ${total} ──" >&2
+    jq -r --argjson lo "$lo" --argjson hi "$hi" '
+      .[($lo):($hi+1)] | to_entries[] |
+      "  #\(.key+$lo+1)  offer \(.value.id)  \(.value.gpu_name) × \(.value.num_gpus)  \(.value.gpu_ram | . / 1024 + 0.5 | floor)GB VRAM  \(.value.cpu_ram | . / 1024 + 0.5 | floor)GB RAM  \(.value.disk_space)GB disk  $\(.value.dph_total | . * 100 | round | . / 100)/hr  rel=\(.value.reliability)  dc=\(.value.datacenter)  \(.value.country)"
+    ' "$sorted" >&2
+    echo "  (pick #  ·  n=next  ·  p=prev  ·  q=quit browse)" >&2
+    read -r -p "  > " pick
+    case "$pick" in
+      q|Q|quit) echo "  Leaving browse (no pick)." >&2; return 1 ;;
+      n|N|next) page=$((page+1)); (( page >= pages )) && page=$((pages-1)); continue ;;
+      p|P|prev) page=$((page-1)); (( page < 0 )) && page=0; continue ;;
+      *)
+        if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= total )); then
+          picked="$pick"; break
+        fi
+        echo "  '$pick' isn't a number 1–${total}, n, p, or q." >&2
+        continue ;;
+    esac
+  done
+  offer_id="$(jq -r --argjson i "$((picked-1))" '.[$i].id' "$sorted")"
+  jq --argjson i "$((picked-1))" '.[$i]' "$sorted" > "$offer"
+  printf '%s\n' "$offer_id" > "$offer_id_file"
+  echo "  You picked offer ${offer_id}." >&2
+  show_offer "$(cat "$offer")" "renting your pick (Vast.ai offer ${offer_id})"
+  read -r -p "  Confirm rent of this box? [y/N] " final
+  case "$final" in
+    y|Y|yes|YES) echo "  confirmed — renting offer ${offer_id}." >&2; return 0 ;;
+    *) echo "  aborted — no instance rented (no spend)." >&2; exit 1 ;;
+  esac
+}
+
 # ---- blast-surface gate: confirm the actual selected offer before the PUT ----
 # The PUT /api/v0/asks/<offer>/ is the one call that spends money. We block it
-# here until the human has seen the *real* cheapest offer (not just the search
-# filter) and consented. --yes / VAST_CONFIRM_RENT=1 skips the prompt; a
-# non-interactive run without consent ABORTS before any spend rather than hang.
+# here until the human has seen the *real* cheapest offer and consented. --yes /
+# VAST_CONFIRM_RENT=1 skips the prompt; a non-interactive run without consent
+# ABORTS before any spend. Answering 'b' (browse) relaxes the soft prefs and lets
+# you page through the whole suitable market to pick the best cost yourself.
 if [[ "$yes" != "1" ]]; then
-  o_gpu="$(jq -r '.gpu_name // "n/a"' "$offer")"
-  o_ngpu="$(jq -r '.num_gpus // "?"' "$offer")"
-  o_vram="$(jq -r '.gpu_ram // "?"' "$offer")"        # MB
-  o_ram="$(jq -r '.cpu_ram // "?"' "$offer")"          # bytes (Vast convention)
-  o_disk="$(jq -r '.disk_space // "?"' "$offer")"      # GB
-  o_dph="$(jq -r '.dph_total // "?"' "$offer")"         # $/hr
-  o_rel="$(jq -r '.reliability // "?"' "$offer")"
-  o_dc="$(jq -r '.datacenter // "n/a"' "$offer")"
-  o_geo="$(jq -r '.geolocation // .country // "?"' "$offer")"
   img_lbl="${template_image:-$(jq -r '.image // "n/a"' "$create_payload")}"
-  # Market type of the WINNING search (the ladder may have switched ondemand->bid).
   mtype="$(jq -r '.type // "n/a"' "$used_payload_file" 2>/dev/null || jq -r '.type // "n/a"' "$search_payload")"
-
-  echo "  ── about to rent (Vast.ai offer ${offer_id}) ───────────────────────" >&2
-  printf '    label        : %s\n' "$name" >&2
-  printf '    image        : %s\n' "$img_lbl" >&2
-  printf '    market type  : %s   (ondemand=stable, bid=interruptible/cheapest, reserved)\n' "$mtype" >&2
-  printf '    GPU          : %s × %s  (%s MB VRAM)\n' "$o_ngpu" "$o_gpu" "$o_vram" >&2
-  printf '    host RAM     : %s bytes\n' "$o_ram" >&2
-  printf '    disk         : %s GB\n' "$o_disk" >&2
-  printf '    $/hour (dph) : %s\n' "$o_dph" >&2
-  printf '    reliability  : %s   datacenter: %s   geo: %s\n' "$o_rel" "$o_dc" "$o_geo" >&2
+  show_offer "$(cat "$offer")" "about to rent (Vast.ai offer ${offer_id}) — cheapest match"
+  printf '    label        : %s\n    image        : %s\n    market type  : %s   (ondemand=stable, bid=interruptible/cheapest, reserved)\n' "$name" "$img_lbl" "$mtype" >&2
   echo "  ─────────────────────────────────────────────────────────────────" >&2
-  # Auditability for the "lowest cost" pick: show the next-cheapest two matches.
-  echo "  next-cheapest matching offers (for sanity-check):" >&2
+  echo "  next-cheapest curated matches (for sanity-check):" >&2
   jq -r '.offers | sort_by(.dph_total) | .[1:3][] | "    offer \(.id): \(.gpu_name) × \(.num_gpus) @ \(.dph_total) $/hr"' "$offers_response" >&2 || true
-  echo
+  echo >&2
 
   if [[ ! -t 0 ]]; then
     echo "  Non-interactive run with no --yes/VAST_CONFIRM_RENT=1: NOT renting (no spend)." >&2
     echo "  Re-run: scripts/deploy.sh --confirm-rent   (or export VAST_CONFIRM_RENT=1)" >&2
     exit 1
   fi
-  read -r -p "  Rent this box now? [y/N] " confirm
-  case "$confirm" in
-    y|Y|yes|YES) echo "  confirmed — renting." >&2 ;;
-    *) echo "  aborted — no instance rented (no spend)." >&2; exit 1 ;;
-  esac
+
+  while true; do
+    read -r -p "  Rent this box now? [y/N] (b=browse all offers, q=quit) " confirm
+    case "$confirm" in
+      y|Y|yes|YES)
+        echo "  confirmed — renting offer ${offer_id}." >&2
+        break ;;
+      b|B|browse)
+        if browse_and_pick; then break; else continue; fi ;;
+      q|Q|quit)
+        echo "  aborted — no instance rented (no spend)." >&2; exit 1 ;;
+      *)
+        echo "  aborted — no instance rented (no spend)." >&2; exit 1 ;;
+    esac
+  done
 fi
 
 curl -fsS \

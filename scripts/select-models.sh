@@ -100,7 +100,7 @@ else
   echo "private-ai-inference — select fleet models to co-host on one Vast.ai box" >&2
   echo "VRAM is sized to 1.25x the largest selected LOCAL model; :cloud models" >&2
   echo "are pulled but excluded from VRAM sizing (served from Ollama cloud)." >&2
-  echo "SSD=200GB, RAM=150GB are fixed." >&2
+  echo "SSD=200GB, RAM=40GB are fixed." >&2
   echo >&2
   i=1
   for entry in "${CATALOG[@]}"; do
@@ -163,7 +163,7 @@ done
 echo >&2
 echo "Largest local model weight: ${largest_local}GB" >&2
 echo "Min VRAM (1.25x largest local, floored at ${MIN_VRAM_FLOOR}GB, capped at ${MIN_VRAM_CEILING}GB): ${min_vram}GB" >&2
-echo "SSD: 200GB (fixed)   RAM: 150GB (fixed)" >&2
+echo "SSD: 200GB (fixed)   RAM: 40GB (fixed)" >&2
 if [[ ${#cloud_models[@]} -gt 0 ]]; then
   echo "Cloud models present: after the box boots, SSH in once and run 'ollama signin'," >&2
   echo "  then 'ollama pull <cloud-model>' for each." >&2
