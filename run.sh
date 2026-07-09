@@ -37,25 +37,73 @@ ask() { # ask "prompt" "varname" "default" [secret]
   printf -v "$name" '%s' "$ans"
 }
 
+# Validate the Vast API key with a live call BEFORE accepting it. Returns 0
+# only if the API answers success:true, so a blank/wrong key is never written
+# to .env (which is what caused the confusing "API error — will rent a new box"
+# even when you had a real instance on the account).
+validate_vast_key() {
+  local key="$1" body succ err url
+  url="${VAST_API_URL:-https://console.vast.ai}"
+  body="$(curl -sS --request GET \
+    --url "${url%/}/api/v0/instances/" \
+    --header "Authorization: Bearer ${key}" 2>/dev/null || true)"
+  if [[ -z "$body" ]]; then
+    echo "    Network error reaching the Vast API (no response)." >&2
+    return 1
+  fi
+  succ="$(printf '%s' "$body" | jq -r '.success // empty' 2>/dev/null || true)"
+  if [[ "$succ" == "true" ]]; then return 0; fi
+  err="$(printf '%s' "$body" | jq -r '.error // .msg // "unknown error"' 2>/dev/null || true)"
+  echo "    Vast API rejected the key: ${err}" >&2
+  echo "    Get/verify it at https://console.vast.ai/account/ and re-enter." >&2
+  return 1
+}
+
+# File exists and is readable.
+require_file() { [[ -n "$1" && -r "$1" ]]; }
+
 # ---- 0. load existing .env (if any), then fill gaps interactively ----
 if [[ -f "$ENV_FILE" ]]; then set -a; . "$ENV_FILE" 2>/dev/null || true; set +a; fi
 
 echo "=== private-ai-inference setup ==="
 echo "(Answers are saved to .env, which is gitignored. Edit it anytime.)"
 echo
-ask "  Vast.ai API key (https://console.vast.ai/account/)" VAST_API_KEY "" secret
-ask "  Path to your Vast SSH key (for ssh_direct)" PRIVATE_AI_SSH_KEY "$HOME/.ssh/vast_ed25519"
+while true; do
+  ask "  Vast.ai API key (https://console.vast.ai/account/)" VAST_API_KEY "" secret
+  if validate_vast_key "$VAST_API_KEY"; then break; fi
+  VAST_API_KEY=""   # bad/blank -> force re-prompt on the next iteration
+done
+while true; do
+  ask "  Path to your Vast SSH key (for ssh_direct)" PRIVATE_AI_SSH_KEY "$HOME/.ssh/vast_ed25519"
+  if require_file "$PRIVATE_AI_SSH_KEY"; then break; fi
+  echo "    Not found or not readable: $PRIVATE_AI_SSH_KEY" >&2
+  PRIVATE_AI_SSH_KEY=""
+done
 echo
 echo "  Optional: GPU gateway repo to clone onto the box (it runs install.sh"
 echo "  and loads the models). Leave blank to pull the selected fleet models"
 echo "  directly in the box onstart instead."
-ask "  GPU repo URL (blank to skip)" PRIVATE_AI_GPU_REPO ""
+while true; do
+  ask "  GPU repo URL (blank to skip)" PRIVATE_AI_GPU_REPO ""
+  if [[ -z "${PRIVATE_AI_GPU_REPO:-}" ]]; then break; fi
+  case "$PRIVATE_AI_GPU_REPO" in
+    https://github.com/*|git@github.com:*) break ;;
+    *) echo "    Expected a GitHub URL (https://github.com/OWNER/REPO(.git) or git@github.com:OWNER/REPO(.git))." >&2; PRIVATE_AI_GPU_REPO="" ;;
+  esac
+done
 if [[ -n "${PRIVATE_AI_GPU_REPO:-}" ]]; then
   ask "  GPU repo entrypoint command" PRIVATE_AI_GPU_REPO_CMD "./install.sh"
-  echo "  If that repo is PRIVATE (it is), you need a read-only GitHub deploy key"
+  echo "  If that repo is PRIVATE, you need a read-only GitHub deploy key"
   echo "  (scripts/new-deploy-key.sh makes one; paste its PUBLIC half into the"
-  echo "  repo's Settings → Deploy keys). Point at the PRIVATE half here."
-  ask "  Path to the deploy private key (blank if repo is public)" PRIVATE_AI_GPU_DEPLOY_KEY "$HOME/.ssh/private-ai-gpu_deploy_ed25519"
+  echo "  repo's Settings → Deploy keys). Point at the PRIVATE half here, or"
+  echo "  leave blank if the repo is public."
+  while true; do
+    ask "  Path to the deploy private key (blank if repo is public)" PRIVATE_AI_GPU_DEPLOY_KEY ""
+    if [[ -z "${PRIVATE_AI_GPU_DEPLOY_KEY:-}" ]]; then break; fi   # public repo -> no key
+    if require_file "$PRIVATE_AI_GPU_DEPLOY_KEY"; then break; fi
+    echo "    Not found or not readable: $PRIVATE_AI_GPU_DEPLOY_KEY (leave blank if repo is public)" >&2
+    PRIVATE_AI_GPU_DEPLOY_KEY=""
+  done
 fi
 
 # ---- write .env (managed vars only; preserved values come from the load above) ----
@@ -83,12 +131,16 @@ deploy_args=(--ssh-key "$PRIVATE_AI_SSH_KEY")
 
 # ---- 1. reuse an existing instance, or rent a new box ("shop")? ----
 echo "=== existing Vast.ai instances on your account ==="
-if scripts/list-instances.sh --list-only 2>/dev/null; then
+list_out="$(scripts/list-instances.sh --list-only 2>/dev/null || true)"
+if [[ -n "$list_out" ]]; then
+  echo "$list_out"
   echo
   read -r -p "Reuse one of the above (enter its ID), or rent a new box (enter 'new')? [new] " choice
   choice="${choice:-new}"
 else
-  echo "  (none reachable / API error — will rent a new box)"
+  # API key was already validated above, so empty output means the account
+  # genuinely has no instances yet (not an auth error).
+  echo "  No instances on your account yet — will rent a new box."
   choice="new"
 fi
 
