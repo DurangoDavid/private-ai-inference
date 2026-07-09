@@ -87,16 +87,50 @@ if [[ -z "$ip" || "$ip" == "null" || -z "$ssh_port" || "$ssh_port" == "null" ]];
   echo "Raw: $chosen_json" >&2
   exit 1
 fi
+
+# If the box isn't running, offer to start it (resumes billing at its dph_total).
+status="$(printf '%s' "$chosen_json" | jq -r '.actual_status // empty')"
+if [[ "$status" != "running" ]]; then
+  dph="$(printf '%s' "$chosen_json" | jq -r '.dph_total // "?"')"
+  gpu="$(printf '%s' "$chosen_json" | jq -r '.gpu_name // "?"')"
+  echo "Instance ${chosen} is not running (status: ${status:-unknown})."
+  echo "  Starting it resumes billing at ~${dph} \$/hr (${gpu})."
+  if [[ ! -t 0 ]]; then
+    echo "  Non-interactive run: NOT starting (no spend). Start it manually, then re-run." >&2
+    exit 1
+  fi
+  read -r -p "  Start it now? [y/N] " start_confirm
+  case "$start_confirm" in
+    y|Y|yes|YES) ;;
+    *) echo "Aborted — nothing started." ; exit 0 ;;
+  esac
+  scripts/vast_start_instance.sh --instance-id "$chosen" --vast-api-url "$vast_api_url"
+  # Re-fetch fresh ip/ssh_port after the start.
+  fresh="$(scripts/vast_list_instances_json.sh --id "$chosen")"
+  chosen_json="$(printf '%s' "$fresh" | jq -c '.instances[0] // empty')"
+  ip="$(printf '%s' "$chosen_json" | jq -r '.public_ipaddr // empty')"
+  ssh_port="$(printf '%s' "$chosen_json" | jq -r '.ssh_host_port // empty')"
+  if [[ -z "$ip" || "$ip" == "null" || -z "$ssh_port" || "$ssh_port" == "null" ]]; then
+    echo "Instance started but ip/ssh_port not available yet; re-run connect shortly." >&2
+    exit 1
+  fi
+fi
+
 echo "Connecting tunnel to instance ${chosen} at ${ip}:${ssh_port} ..."
 
 # Stand up the tunnel.
 scripts/setup-tunnel.sh "$ip" "$ssh_port" "$ssh_key"
 
-# Test through the tunnel.
+# Test through the tunnel (retry — a freshly-started box needs boot time for
+# the tunnel to establish and Ollama to come back up).
 echo "Testing through the tunnel..."
-sleep 3
-if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-  echo "Tunnel up, but /api/tags not reachable on 127.0.0.1:11434." >&2
+ok=0
+for _ in $(seq 1 24); do  # ~2 min
+  if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then ok=1; break; fi
+  sleep 5
+done
+if [[ $ok -ne 1 ]]; then
+  echo "Tunnel up, but /api/tags not reachable on 127.0.0.1:11434 after ~2 min." >&2
   echo "Is Ollama actually running on the box? This script does NOT install it." >&2
   echo "If the box has no Ollama, provision a fresh one with: scripts/deploy.sh" >&2
   exit 1

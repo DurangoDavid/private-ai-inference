@@ -44,8 +44,11 @@ if [[ -z "$instance_id" ]]; then
   instance_id="$(tr -d '[:space:]' < "$instance_id_file")"
 fi
 
-mkdir -p "$state_dir"
-info_file="$state_dir/instance_info.json"
+info_file=""
+if [[ -n "$state_dir" ]]; then
+  mkdir -p "$state_dir"
+  info_file="$state_dir/instance_info.json"
+fi
 
 # The v0 single-instance GET (like the v0 list) is deprecated, and v1 has no
 # single-instance route. Poll the v1 list filtered by id instead. The helper
@@ -63,7 +66,7 @@ while true; do
     info="$(printf '%s' "$one" | jq -c "$extract" 2>/dev/null || true)"
     status="$(printf '%s' "$info" | jq -r '.status // empty' 2>/dev/null || true)"
     if [[ "$status" == "running" ]]; then
-      printf '%s\n' "$info" | jq '.' > "$info_file"
+      [[ -n "$info_file" ]] && printf '%s\n' "$info" | jq '.' > "$info_file"
       printf '%s\n' "$info"
       echo "Instance ${instance_id} is running." >&2
       exit 0
@@ -77,7 +80,7 @@ while true; do
   fi
   if [[ $(date +%s) -ge $deadline ]]; then
     echo "Timed out waiting for instance ${instance_id} to reach 'running' (${timeout_sec}s)." >&2
-    [[ -n "$info" ]] && printf '%s\n' "$info" > "$info_file"
+    [[ -n "$info" && -n "$info_file" ]] && printf '%s\n' "$info" > "$info_file"
     exit 1
   fi
   sleep 10
