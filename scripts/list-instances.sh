@@ -31,52 +31,30 @@ done
 
 export VAST_API_KEY="${VAST_API_KEY:?VAST_API_KEY must be exported (see .env)}"
 
-# jq: per instance, extract the SSH host port (container port 22) tolerating the
-# common Vast `ports` shapes (array of host-port strings, or objects with HostPort).
-extract_ssh='
-def sshport:
-  (.ports["22"] // .ports["22/tcp"]) |
-  if . == null then null
-  elif (type == "array") then .[0]
-  elif (type == "object") then (.HostPort // (.[0].HostPort // null))
-  else . end;
-{ id, label, status:.actual_status, ip:.public_ipaddr,
-  ssh_host_port:(sshport), dph:.dph_total,
-  gpu:.gpu_name, gpus:.num_gpus, gpu_ram_mb:.gpu_ram, cpu_ram:.cpu_ram, disk_gb:.disk_space }
-'
+# Fetch via the current v1 list endpoint (v0 /api/v0/instances/ is deprecated).
+instances_json="$(scripts/vast_list_instances_json.sh)"
+count="$(printf '%s' "$instances_json" | jq '.instances | length')"
 
-resp="$(mktemp)"
-curl -fsS \
-  --request GET \
-  --url "${vast_api_url%/}/api/v0/instances/" \
-  --header "Authorization: Bearer ${VAST_API_KEY}" \
-  > "$resp"
-
-count="$(jq '.instances | length' "$resp")"
-if [[ "$count" -eq 0 || "$count" == "null" ]]; then
+if [[ "$count" -eq 0 ]]; then
   echo "No Vast.ai instances found on this account." >&2
   exit 0
 fi
 
-instances_json="$(jq -c '.instances[] | '"$extract_ssh" "$resp")"
-
-echo "Vast.ai instances on this account (${count}):"
+echo "Vast.ai instances on your account (${count}):"
 printf '%-10s %-22s %-10s %-16s %-8s %-7s %s\n' "ID" "LABEL" "STATUS" "IP" "SSH" "$/hr" "GPU"
 echo "---------------------------------------------------------------------------------------------------"
 ids=()
-i=1
 while IFS= read -r line; do
   id="$(printf '%s' "$line" | jq -r '.id')"
   label="$(printf '%s' "$line" | jq -r '.label // "-"')"
-  status="$(printf '%s' "$line" | jq -r '.status // "-"')"
-  ip="$(printf '%s' "$line" | jq -r '.ip // "-"')"
+  status="$(printf '%s' "$line" | jq -r '.actual_status // "-"')"
+  ip="$(printf '%s' "$line" | jq -r '.public_ipaddr // "-"')"
   sshp="$(printf '%s' "$line" | jq -r '.ssh_host_port // "-"')"
-  dph="$(printf '%s' "$line" | jq -r '.dph // 0' | awk '{printf "%.2f", $1}')"
-  gpu="$(printf '%s' "$line" | jq -r '.gpu // "-"')"
+  dph="$(printf '%s' "$line" | jq -r '.dph_total // 0' | awk '{printf "%.2f", $1}')"
+  gpu="$(printf '%s' "$line" | jq -r '.gpu_name // "-"')"
   printf '%-10s %-22s %-10s %-16s %-8s %-7s %s\n' "$id" "$label" "$status" "$ip" "$sshp" "$dph" "$gpu"
   ids+=("$id")
-  i=$((i+1))
-done <<< "$instances_json"
+done < <(printf '%s' "$instances_json" | jq -c '.instances[]')
 echo
 
 if [[ "$mode" == "list-only" ]]; then
@@ -101,8 +79,8 @@ else
 fi
 
 # Pull the chosen instance's ip + ssh port fresh.
-chosen_json="$(printf '%s\n' "$instances_json" | jq -r --arg id "$chosen" 'select(.id == ($id|tonumber))')"
-ip="$(printf '%s' "$chosen_json" | jq -r '.ip // empty')"
+chosen_json="$(printf '%s' "$instances_json" | jq -c --arg id "$chosen" '.instances[] | select(.id == ($id|tonumber))')"
+ip="$(printf '%s' "$chosen_json" | jq -r '.public_ipaddr // empty')"
 ssh_port="$(printf '%s' "$chosen_json" | jq -r '.ssh_host_port // empty')"
 if [[ -z "$ip" || "$ip" == "null" || -z "$ssh_port" || "$ssh_port" == "null" ]]; then
   echo "Could not get ip/ssh port for instance ${chosen} (is it running?)." >&2

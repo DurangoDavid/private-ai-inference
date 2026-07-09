@@ -47,27 +47,20 @@ fi
 mkdir -p "$state_dir"
 info_file="$state_dir/instance_info.json"
 
-# jq filter: extract the SSH host port from the Vast `ports` map, tolerating the
-# common shapes (array of host-port strings, or objects with HostPort).
-extract='def sshport:
-  (.ports["22"] // .ports["22/tcp"]) |
-  if . == null then null
-  elif (type == "array") then .[0]
-  elif (type == "object") then (.HostPort // (.[0].HostPort // null))
-  else . end;
-{instance_id:.id, status:.actual_status, public_ipaddr:.public_ipaddr, ports:.ports, ssh_host_port:(sshport)}'
+# The v0 single-instance GET (like the v0 list) is deprecated, and v1 has no
+# single-instance route. Poll the v1 list filtered by id instead. The helper
+# normalizes + precomputes ssh_host_port.
+export VAST_API_URL="$vast_api_url"
+extract='{instance_id:.id, status:.actual_status, public_ipaddr:.public_ipaddr, ports:.ports, ssh_host_port:.ssh_host_port}'
 
 deadline=$(( $(date +%s) + timeout_sec ))
 last=""
+info=""
 while true; do
-  if ! curl -fsS \
-    --request GET \
-    --url "${vast_api_url%/}/api/v0/instances/${instance_id}/" \
-    --header "Authorization: Bearer ${VAST_API_KEY}" \
-    > "$state_dir/instance_raw.json" 2>/dev/null; then
-    echo "instance not reachable yet (API error); retrying..." >&2
-  else
-    info="$(jq -c "$extract" "$state_dir/instance_raw.json" 2>/dev/null || true)"
+  raw="$(scripts/vast_list_instances_json.sh --id "$instance_id" 2>/dev/null || true)"
+  one="$(printf '%s' "$raw" | jq -c '.instances[0] // empty' 2>/dev/null || true)"
+  if [[ -n "$one" ]]; then
+    info="$(printf '%s' "$one" | jq -c "$extract" 2>/dev/null || true)"
     status="$(printf '%s' "$info" | jq -r '.status // empty' 2>/dev/null || true)"
     if [[ "$status" == "running" ]]; then
       printf '%s\n' "$info" | jq '.' > "$info_file"
@@ -79,6 +72,8 @@ while true; do
       echo "instance ${instance_id} status: ${status:-unknown}; waiting for running..." >&2
       last="$status"
     fi
+  else
+    echo "instance ${instance_id} not found yet (provisioning or API error); retrying..." >&2
   fi
   if [[ $(date +%s) -ge $deadline ]]; then
     echo "Timed out waiting for instance ${instance_id} to reach 'running' (${timeout_sec}s)." >&2

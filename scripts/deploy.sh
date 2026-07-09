@@ -89,26 +89,21 @@ if [[ $destroy -eq 1 ]]; then
 fi
 
 # ---- 0. reuse an existing instance instead of renting ----
-# Query /api/v0/instances/ for a running instance. If --reuse-instance is given,
+# Query the v1 instances list (vast_list_instances_json.sh) for a running instance. If --reuse-instance is given,
 # use that id; with --prefer-existing, auto-pick the first running one. On a hit,
 # hand off to list-instances.sh (tunnel + test) and stop — no rent, no terraform.
 if [[ -n "$reuse_instance" || $prefer_existing -eq 1 ]]; then
   echo ">>> 0/6 checking for an existing Vast.ai instance to reuse..."
-  resp="$(mktemp)"
-  curl -fsS --request GET \
-    --url "${vast_api_url%/}/api/v0/instances/" \
-    --header "Authorization: Bearer ${VAST_API_KEY}" \
-    > "$resp"
+  resp="$(scripts/vast_list_instances_json.sh)"
   if [[ -n "$reuse_instance" ]]; then
     target="$reuse_instance"
-    if ! jq -e --arg id "$reuse_instance" '.instances[] | select(.id == ($id|tonumber))' "$resp" >/dev/null 2>&1; then
+    if ! printf '%s' "$resp" | jq -e --arg id "$reuse_instance" '.instances[] | select(.id == ($id|tonumber))' >/dev/null 2>&1; then
       echo "Instance ${reuse_instance} is not on this account." >&2
-      rm -f "$resp"; exit 1
+      exit 1
     fi
   else
-    target="$(jq -r '[.instances[] | select(.actual_status == "running")] | .[0].id // empty' "$resp")"
+    target="$(printf '%s' "$resp" | jq -r '[.instances[] | select(.actual_status == "running")] | .[0].id // empty')"
   fi
-  rm -f "$resp"
   if [[ -n "$target" ]]; then
     echo ">>> reusing existing instance ${target} (no provisioning)"
     exec scripts/list-instances.sh --connect "$target" --ssh-key "$ssh_key"

@@ -193,19 +193,17 @@ printf '%s\n' "$instance_id" > "$instance_id_file"
 
 # Best-effort: capture public_ipaddr + ports now. The instance may not be
 # running yet (Vast assigns IP/SSH-host-port asynchronously); scripts/vast_instance_info.sh
-# polls reliably if this is incomplete. Never fail the create here.
+# polls reliably if this is incomplete. Never fail the create here. Use the v1
+# list-by-id helper (v0 single-instance GET is deprecated; v1 has no single route).
 info_file="$state_dir/instance_info.json"
-if curl -fsS \
-  --request GET \
-  --url "${vast_api_url%/}/api/v0/instances/${instance_id}/" \
-  --header "Authorization: Bearer ${VAST_API_KEY}" \
-  > "$state_dir/instance_raw.json" 2>/dev/null; then
-  jq -n --arg id "$instance_id" --slurpfile inst "$state_dir/instance_raw.json" \
-    '{instance_id:$id, status:($inst[0].actual_status // null), public_ipaddr:($inst[0].public_ipaddr // null), ports:($inst[0].ports // null)}' \
+export VAST_API_URL="$vast_api_url"
+if raw="$(scripts/vast_list_instances_json.sh --id "$instance_id" 2>/dev/null)" && \
+   one="$(printf '%s' "$raw" | jq -c '.instances[0] // empty' 2>/dev/null)" && [[ -n "$one" ]]; then
+  printf '%s' "$one" | jq -c '{instance_id:.id, status:.actual_status, public_ipaddr:.public_ipaddr, ports:.ports, ssh_host_port:.ssh_host_port}' \
     > "$info_file" 2>/dev/null || \
-    printf '{"instance_id":"%s","status":null,"public_ipaddr":null,"ports":null}\n' "$instance_id" > "$info_file"
+    printf '{"instance_id":"%s","status":null,"public_ipaddr":null,"ports":null,"ssh_host_port":null}\n' "$instance_id" > "$info_file"
 else
-  printf '{"instance_id":"%s","status":null,"public_ipaddr":null,"ports":null}\n' "$instance_id" > "$info_file"
+  printf '{"instance_id":"%s","status":null,"public_ipaddr":null,"ports":null,"ssh_host_port":null}\n' "$instance_id" > "$info_file"
 fi
 
 echo "Created Vast.ai instance ${instance_id} for ${name} from offer ${offer_id}."

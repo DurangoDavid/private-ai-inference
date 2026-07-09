@@ -44,9 +44,14 @@ ask() { # ask "prompt" "varname" "default" [secret]
 validate_vast_key() {
   local key="$1" body succ err url
   url="${VAST_API_URL:-https://console.vast.ai}"
-  body="$(curl -sS --request GET \
-    --url "${url%/}/api/v0/instances/" \
-    --header "Authorization: Bearer ${key}" 2>/dev/null || true)"
+  # v0 /api/v0/instances/ is deprecated (410 for valid keys); validate against v1.
+  body="$(curl -sS -G \
+    --url "${url%/}/api/v1/instances/" \
+    --header "Authorization: Bearer ${key}" \
+    --header "Content-Type: application/json" \
+    --data-urlencode "limit=1" \
+    --data-urlencode 'select_cols=["id"]' \
+    --data-urlencode 'select_filters={}' 2>/dev/null || true)"
   if [[ -z "$body" ]]; then
     echo "    Network error reaching the Vast API (no response)." >&2
     return 1
