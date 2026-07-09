@@ -98,11 +98,15 @@ scripts/deploy.sh --model-repo https://github.com/DurangoDavid/private-ai-gpu.gi
 ```
 
 `deploy.sh` runs the full flow: (0) reuse an existing instance if `--prefer-existing`
-/`--reuse-instance` is given → (1) select + size → (2) `terraform apply` (rents
-the cheapest Ollama-template offer by default) → (3) wait for `running` +
-Ollama up → (4b) deploy your model repo if `--model-repo` is given → (5) wait
-for the selected local models in `/api/tags` → (6) stand up the SSH tunnel →
-(7) test through it (`/api/tags` + `/api/generate`). On success it prints the
+/`--reuse-instance` is given → (1) select + size → (2) a **render-only**
+`terraform apply` (`enable_provisioning=false` — writes the search/create
+payloads but rents nothing), then rents **directly in `deploy.sh`'s own TTY** so
+the confirm-before-spend gate can prompt an interactive `y/N` against the real
+cheapest offer (the rent no longer runs inside terraform's non-TTY
+`local-exec`, which could never prompt) → (3) wait for `running` + Ollama up →
+(4b) deploy your model repo if `--model-repo` is given → (5) wait for the
+selected local models in `/api/tags` → (6) stand up the SSH tunnel → (7) test
+through it (`/api/tags` + `/api/generate`). On success it prints the
 `OLLAMA_BASE_URL` to point the Hub CPU VM at.
 
 Then on the Hub CPU VM (or same box), set:
@@ -216,12 +220,17 @@ Neither installs Ollama; if the chosen box has none, rent a fresh one with
 
 ## Swap the GPU box
 
-Vast reassigns the instance (or you move hosts) → re-run the deploy:
+Vast reassigns the instance (or you move hosts) → re-run the deploy. Because the
+apply is render-only, **changing `--models` does NOT auto-destroy the old box**
+(there's no `null_resource` managing the rent anymore). The instance id is the
+source of truth and lives in `<state_dir>/instance_id` — `deploy.sh --destroy`
+reads it and tears the live box down. So to swap with a different model set:
 
 ```bash
-scripts/deploy.sh --models <same set> --ssh-key ~/.ssh/vast_ed25519
-# or, to reuse the flow without re-provisioning an already-running box:
-scripts/deploy.sh --no-provision
+scripts/deploy.sh --destroy --ssh-key ~/.ssh/vast_ed25519   # tear down the live box first
+scripts/deploy.sh --models <new set> --ssh-key ~/.ssh/vast_ed25519   # then rent the new one
+# or, to reuse the flow without re-renting an already-running box:
+scripts/deploy.sh --no-provision --ssh-key ~/.ssh/vast_ed25519
 ```
 
 `OLLAMA_BASE_URL` on the Hub never moves — that's the swap guarantee.
@@ -234,11 +243,17 @@ python3 scripts/smoke_test.py --base-url http://127.0.0.1:11434 --model qwen3.6:
 
 ## Destroy
 
+`deploy.sh --destroy` tears the live box down **explicitly** (terraform no longer
+manages the rent): it reads `<state_dir>/instance_id` and DELETEs the instance
+(idempotent — a stale id or an already-preempted box is a no-op), removes the
+tunnel container, then runs a render-only `terraform destroy` to clean the
+rendered payload files.
+
 ```bash
 source .env
-scripts/deploy.sh --destroy     # terraform destroy + tear down the tunnel container
-# or directly:
-terraform destroy -auto-approve -var enable_provisioning=true
+scripts/deploy.sh --destroy --ssh-key ~/.ssh/vast_ed25519   # Vast instance + tunnel + rendered state
+# or, just the rendered terraform state (will NOT touch the live box — instance_id is the source of truth):
+terraform destroy -auto-approve -var enable_provisioning=false
 ```
 
 ## Files

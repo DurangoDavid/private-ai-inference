@@ -13,8 +13,8 @@ locals {
     direct_port_count = { gte = 1 }
     reliability       = { gte = var.min_reliability }
     dph_total         = { lte = var.max_dollars_per_hour }
-    disk_space        = { gte = var.disk_gb }
-    cpu_ram           = { gte = var.ram_gb }
+    disk_space        = { gte = var.disk_gb }            # GB
+    cpu_ram           = { gte = var.ram_gb * 1024 }      # MB (Vast filters: disk_space=GB, cpu_ram/gpu_ram=MB)
     num_gpus          = { gte = var.num_gpus }
     gpu_ram           = { gte = var.min_gpu_ram_mb }
     gpu_name          = { in = var.gpu_names }

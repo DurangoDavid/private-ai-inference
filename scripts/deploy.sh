@@ -28,6 +28,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Auto-load .env (gitignored) when VAST_API_KEY isn't already set, so this script
+# works when invoked directly (`scripts/deploy.sh ...`), not just via run.sh
+# (which sources .env itself). Only load when VAST_API_KEY is unset so an
+# explicitly-exported key (and any other explicit exports) always wins; loading
+# pulls in every .env var (VAST_API_KEY, PRIVATE_AI_GPU_REPO, etc.) via set -a.
+if [[ -z "${VAST_API_KEY:-}" ]] && [[ -f .env ]]; then
+  set -a; . .env 2>/dev/null || true; set +a
+fi
+
 ssh_key="${PRIVATE_AI_SSH_KEY:-}"
 models_arg=""
 no_provision=0
@@ -74,22 +83,41 @@ model_repo_key="${model_repo_key:-${PRIVATE_AI_GPU_DEPLOY_KEY:-}}"
 export VAST_API_KEY="${VAST_API_KEY:?VAST_API_KEY must be exported (see .env)}"
 vast_api_url="${VAST_API_URL:-https://console.vast.ai}"
 
-# --confirm-rent pre-consents the rent so vast_create_instance.sh (invoked by
-# terraform's local-exec) skips its confirm-before-spend prompt. Without this,
-# the create script prompts on a TTY for an explicit y/N against the *real*
-# cheapest offer; a non-TTY run without consent aborts before any spend.
-# It also pre-consents starting a stopped box on the reuse path (also a spend),
-# via VAST_CONFIRM_START (read by list-instances.sh).
+# --confirm-rent pre-consents the rent so vast_create_instance.sh skips its
+# confirm-before-spend prompt. The rent is now invoked DIRECTLY by this script
+# (step 2b), NOT inside terraform's local-exec (which has no TTY and so could
+# never prompt). deploy.sh inherits the TTY from run.sh, so by default the rent
+# gate prompts an explicit y/N against the *real* cheapest offer; --confirm-rent
+# (or VAST_CONFIRM_RENT=1) skips that prompt for automation, and a non-TTY run
+# without consent still aborts before any spend. VAST_CONFIRM_START likewise
+# pre-consents starting a stopped box on the reuse path (also a spend).
 if [[ $confirm_rent -eq 1 ]]; then
   export VAST_CONFIRM_RENT=1
   export VAST_CONFIRM_START=1
 fi
 
 # ---- destroy path ----
+# Terraform no longer manages the Vast instance lifecycle (the apply is
+# render-only: enable_provisioning=false -> no null_resource, no rent). So
+# `terraform destroy` alone would NOT tear down the live box — it only removes
+# the rendered payload files. Destroy the Vast instance explicitly FIRST (it's
+# idempotent: a missing/stale instance_id or a 404 is a no-op), then the tunnel
+# container, then the terraform-rendered state files.
 if [[ $destroy -eq 1 ]]; then
-  echo ">>> Tearing down: terraform destroy + tunnel container"
+  echo ">>> Tearing down: Vast instance + tunnel container + rendered state"
+  node_state_dir=""
+  node_name=""
+  node_state_dir="$(terraform output -json node_state_dirs 2>/dev/null | jq -r '.[0] // empty')" || true
+  node_name="$(terraform output -json node_names 2>/dev/null | jq -r '.[0] // empty')" || true
+  if [[ -n "$node_state_dir" && "$node_state_dir" != "null" ]]; then
+    scripts/vast_destroy_instance.sh --name "${node_name:-unknown}" --vast-api-url "$vast_api_url" --state-dir "$node_state_dir" || true
+  else
+    echo "    (no terraform state -> no instance_id to destroy; skip Vast destroy)"
+  fi
   docker rm -f private-ai-ollama-tunnel >/dev/null 2>&1 || true
-  exec terraform destroy -auto-approve -var enable_provisioning=true
+  terraform destroy -auto-approve -var enable_provisioning=false || true
+  echo ">>> teardown complete (instance_id was the source of truth; box is gone or was already gone)."
+  exit 0
 fi
 
 # ---- 0. reuse an existing instance instead of renting ----
@@ -132,25 +160,47 @@ if [[ -z "$selected_models" ]]; then echo "No models selected." >&2; exit 1; fi
 # terraform list literal: ["a","b"]
 tf_list="[\"$(printf '%s' "$selected_models" | sed 's/,/","/g')\"]"
 
-# ---- 2. provision ----
+# ---- 2. provision (render-only terraform, then rent in THIS process) ----
+# The terraform apply is RENDER-ONLY: enable_provisioning=false -> the
+# render_only_node materializes search_payload.json / create_payload.json /
+# onstart-ollama.sh into .terraform-poc-state/<name>/ but creates NO
+# null_resource, so it never rents and never spends. We then rent DIRECTLY here
+# (step 2b) by calling vast_create_instance.sh as a child of this script —
+# which inherits run.sh's TTY, so the confirm-before-spend gate can finally
+# prompt an interactive y/N against the real cheapest offer. (The old design
+# ran the rent inside terraform's local-exec provisioner, which has no TTY on
+# stdin, so the gate could never prompt and every rent aborted as "no spend".)
 if [[ $no_provision -eq 0 ]]; then
   mode_lbl="Ollama template (preinstalled)"
   [[ $use_template -eq 0 ]] && mode_lbl="bare CUDA image + onstart install"
-  echo ">>> 2/6 terraform init + apply (selected_models=${tf_list}, disk=200, ram=150, mode=${mode_lbl})"
+  echo ">>> 2/6 terraform init + render payloads (selected_models=${tf_list}, disk=200, ram=150, mode=${mode_lbl}, NO rent)"
   tf_vars=(
     -var "selected_models=${tf_list}"
     -var "disk_gb=200"
     -var "ram_gb=150"
-    -var "enable_provisioning=true"
+    -var "enable_provisioning=false"
     -var "use_ollama_template=$([[ $use_template -eq 1 ]] && echo true || echo false)"
     -var "model_repo_url=${model_repo}"
   )
   [[ -n "$template_image" ]] && tf_vars+=(-var "ollama_template_image=${template_image}")
   [[ -n "$market_type" ]] && tf_vars+=(-var "market_type=${market_type}")
   terraform init -input=false
-  terraform apply -auto-approve "${tf_vars[@]}"
+  terraform apply -auto-approve "${tf_vars[@]}"   # render-only: no null_resource, no rent, no spend
+
+  # 2b. rent — in deploy.sh's own TTY so the confirm-before-spend gate prompts.
+  node_state_dir="$(terraform output -json node_state_dirs | jq -r '.[0]')"
+  node_name="$(terraform output -json node_names | jq -r '.[0]')"
+  node_tpl="$(terraform output -json node_template_images | jq -r '.[0] // empty')"
+  rent_args=(--name "$node_name" --vast-api-url "$vast_api_url"
+             --search-payload "$node_state_dir/search_payload.json"
+             --create-payload "$node_state_dir/create_payload.json"
+             --state-dir "$node_state_dir")
+  # template-image only in template mode (non-empty output); bare-image mode has none.
+  [[ -n "$node_tpl" && "$node_tpl" != "null" ]] && rent_args+=(--template-image "$node_tpl")
+  echo ">>> 2b/6 rent — confirm-before-spend prompt follows (y/N against the real cheapest offer)"
+  scripts/vast_create_instance.sh "${rent_args[@]}"
 else
-  echo ">>> 2/6 --no-provision: reusing terraform-managed instance (skipping apply)"
+  echo ">>> 2/6 --no-provision: reusing existing instance (skipping render+rent)"
 fi
 
 # ---- 3. wait for running + capture connectivity ----
