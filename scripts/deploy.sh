@@ -22,6 +22,9 @@
 #   scripts/deploy.sh --no-template                # bare CUDA image + onstart install (fallback)
 #   scripts/deploy.sh --no-provision               # re-tunnel + retest the terraform-managed instance
 #   scripts/deploy.sh --destroy                    # tear down the instance + tunnel unit
+#   scripts/deploy.sh --confirm-rent               # skip the confirm-before-spend prompt on a
+#                                                  # fresh rent (default: prompts y/N against the
+#                                                  # real cheapest offer; non-TTY w/o consent aborts)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -39,6 +42,7 @@ model_repo_key=""
 use_template=1
 template_image=""
 market_type=""
+confirm_rent=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -55,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --no-template) use_template=0; shift ;;
     --template-image) template_image="$2"; shift 2 ;;
     --market-type) market_type="$2"; shift 2 ;;
+    --confirm-rent) confirm_rent=1; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -68,6 +73,12 @@ model_repo_key="${model_repo_key:-${PRIVATE_AI_GPU_DEPLOY_KEY:-}}"
 
 export VAST_API_KEY="${VAST_API_KEY:?VAST_API_KEY must be exported (see .env)}"
 vast_api_url="${VAST_API_URL:-https://console.vast.ai}"
+
+# --confirm-rent pre-consents the rent so vast_create_instance.sh (invoked by
+# terraform's local-exec) skips its confirm-before-spend prompt. Without this,
+# the create script prompts on a TTY for an explicit y/N against the *real*
+# cheapest offer; a non-TTY run without consent aborts before any spend.
+[[ $confirm_rent -eq 1 ]] && export VAST_CONFIRM_RENT=1
 
 # ---- destroy path ----
 if [[ $destroy -eq 1 ]]; then

@@ -7,6 +7,7 @@ search_payload=""
 create_payload=""
 state_dir=""
 template_image=""
+yes=0   # --yes / VAST_CONFIRM_RENT=1 skips the confirm-before-spend prompt
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -38,12 +39,21 @@ while [[ $# -gt 0 ]]; do
       template_image="$2"
       shift 2
       ;;
+    --yes)
+      # Skip the confirm-before-spend prompt (automation / re-run after review).
+      yes=1
+      shift
+      ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 2
       ;;
   esac
 done
+
+# Allow deploy.sh to pre-consent via env (threaded through terraform apply ->
+# local-exec, which inherits this process's exported environment).
+[[ "${VAST_CONFIRM_RENT:-0}" == "1" ]] && yes=1
 
 if [[ -z "${VAST_API_KEY:-}" ]]; then
   echo "VAST_API_KEY must be exported before terraform apply." >&2
@@ -117,6 +127,51 @@ if [[ -z "$offer_id" || "$offer_id" == "null" ]]; then
 fi
 
 printf '%s\n' "$offer_id" > "$offer_id_file"
+
+# ---- blast-surface gate: confirm the actual selected offer before the PUT ----
+# The PUT /api/v0/asks/<offer>/ is the one call that spends money. We block it
+# here until the human has seen the *real* cheapest offer (not just the search
+# filter) and consented. --yes / VAST_CONFIRM_RENT=1 skips the prompt; a
+# non-interactive run without consent ABORTS before any spend rather than hang.
+if [[ "$yes" != "1" ]]; then
+  o_gpu="$(jq -r '.gpu_name // "n/a"' "$offer")"
+  o_ngpu="$(jq -r '.num_gpus // "?"' "$offer")"
+  o_vram="$(jq -r '.gpu_ram // "?"' "$offer")"        # MB
+  o_ram="$(jq -r '.cpu_ram // "?"' "$offer")"          # bytes (Vast convention)
+  o_disk="$(jq -r '.disk_space // "?"' "$offer")"      # GB
+  o_dph="$(jq -r '.dph_total // "?"' "$offer")"         # $/hr
+  o_rel="$(jq -r '.reliability // "?"' "$offer")"
+  o_dc="$(jq -r '.datacenter // "n/a"' "$offer")"
+  o_geo="$(jq -r '.geolocation // .country // "?"' "$offer")"
+  img_lbl="${template_image:-$(jq -r '.image // "n/a"' "$create_payload")}"
+  mtype="$(jq -r '.type // "n/a"' "$search_payload")"
+
+  echo "  ── about to rent (Vast.ai offer ${offer_id}) ───────────────────────" >&2
+  printf '    label        : %s\n' "$name" >&2
+  printf '    image        : %s\n' "$img_lbl" >&2
+  printf '    market type  : %s   (ondemand=stable, bid=interruptible/cheapest, reserved)\n' "$mtype" >&2
+  printf '    GPU          : %s × %s  (%s MB VRAM)\n' "$o_ngpu" "$o_gpu" "$o_vram" >&2
+  printf '    host RAM     : %s bytes\n' "$o_ram" >&2
+  printf '    disk         : %s GB\n' "$o_disk" >&2
+  printf '    $/hour (dph) : %s\n' "$o_dph" >&2
+  printf '    reliability  : %s   datacenter: %s   geo: %s\n' "$o_rel" "$o_dc" "$o_geo" >&2
+  echo "  ─────────────────────────────────────────────────────────────────" >&2
+  # Auditability for the "lowest cost" pick: show the next-cheapest two matches.
+  echo "  next-cheapest matching offers (for sanity-check):" >&2
+  jq -r '.offers | sort_by(.dph_total) | .[1:3][] | "    offer \(.id): \(.gpu_name) × \(.num_gpus) @ \(.dph_total) $/hr"' "$offers_response" >&2 || true
+  echo
+
+  if [[ ! -t 0 ]]; then
+    echo "  Non-interactive run with no --yes/VAST_CONFIRM_RENT=1: NOT renting (no spend)." >&2
+    echo "  Re-run: scripts/deploy.sh --confirm-rent   (or export VAST_CONFIRM_RENT=1)" >&2
+    exit 1
+  fi
+  read -r -p "  Rent this box now? [y/N] " confirm
+  case "$confirm" in
+    y|Y|yes|YES) echo "  confirmed — renting." >&2 ;;
+    *) echo "  aborted — no instance rented (no spend)." >&2; exit 1 ;;
+  esac
+fi
 
 curl -fsS \
   --request PUT \
