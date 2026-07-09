@@ -103,26 +103,87 @@ if [[ -n "$template_image" ]]; then
   create_payload="$merged_payload"
 fi
 
+base_payload="$(cat "$search_payload")"
 offers_response="$state_dir/offers.json"
 offer="$state_dir/offer.json"
 offer_id_file="$state_dir/offer_id"
 create_response="$state_dir/create_response.json"
 instance_id_file="$state_dir/instance_id"
+used_payload_file="$state_dir/search_payload_used.json"
 
-curl -fsS \
-  --request POST \
-  --url "${vast_api_url%/}/api/v0/bundles/" \
-  --header "Authorization: Bearer ${VAST_API_KEY}" \
-  --header "Content-Type: application/json" \
-  --data @"$search_payload" \
-  > "$offers_response"
+# ---- best-price rent with a fallback ladder (p3) ----
+# Search /api/v0/bundles/ with the chosen options. If it returns 0 offers,
+# auto-relax IN ORDER — raise the $/hr cap -> drop the datacenter requirement
+# -> broaden the GPU name whitelist (the VRAM/disk/RAM floors are kept) ->
+# on-demand/reserved -> bid (interruptible, cheapest) — until an offer is
+# found. Each step is CUMULATIVE. The confirm-before-spend gate below still
+# shows the *actual* cheapest offer from the WINNING search, so a human always
+# consents to the real box (and --yes/VAST_CONFIRM_RENT bypasses only the
+# prompt, after this ladder has run). $used_payload_file records which option
+# set actually rented, for auditability.
+search_offers() {  # $1=payload json  $2=out file ; writes the bundles response
+  printf '%s' "$1" | curl -sS --request POST \
+    --url "${vast_api_url%/}/api/v0/bundles/" \
+    --header "Authorization: Bearer ${VAST_API_KEY}" \
+    --header "Content-Type: application/json" \
+    --data @- > "$2" 2>/dev/null || true
+}
+
+# Build the cumulative relaxation ladder (step 0 = the payload as-given).
+dph_cap="$(printf '%s' "$base_payload" | jq -r '.dph_total.lte // empty')"
+relaxed_cap=""
+if [[ -n "$dph_cap" && "$dph_cap" != "null" ]]; then
+  # 4x the cap, hard ceiling at 80 $/hr so --yes automation can't rent a runaway.
+  relaxed_cap="$(jq -n --argjson c "$dph_cap" '[$c*4, 80] | min')"
+fi
+cur_type="$(printf '%s' "$base_payload" | jq -r '.type // empty')"
+
+ladder_labels=( "chosen filters (as-given)" )
+ladder_filters=( "." )
+if [[ -n "$relaxed_cap" ]]; then
+  ladder_labels+=( "raise $/hr cap ${dph_cap} -> ${relaxed_cap}" )
+  ladder_filters+=( ".dph_total.lte = ${relaxed_cap}" )
+fi
+ladder_labels+=( "drop datacenter requirement" )
+ladder_filters+=( 'del(.datacenter)' )
+ladder_labels+=( "broaden GPU list (any GPU name; VRAM floor kept)" )
+ladder_filters+=( 'del(.gpu_name)' )
+if [[ "$cur_type" == "ondemand" || "$cur_type" == "reserved" ]]; then
+  ladder_labels+=( "switch market type ${cur_type} -> bid (interruptible)" )
+  ladder_filters+=( '.type = "bid"' )
+fi
+
+echo "Searching Vast.ai offers (best price) for ${name}..." >&2
+working="$base_payload"
+found=0
+for i in "${!ladder_filters[@]}"; do
+  label="${ladder_labels[$i]}"
+  working="$(printf '%s' "$working" | jq -c "${ladder_filters[$i]}")"
+  echo "  attempt $((i+1))/${#ladder_filters[@]}: ${label}" >&2
+  search_offers "$working" "$offers_response"
+  n="$(jq '(.offers // []) | length' "$offers_response" 2>/dev/null || echo 0)"
+  if [[ "$n" -gt 0 ]]; then
+    echo "  -> ${n} offers found with: ${label}" >&2
+    printf '%s' "$working" > "$used_payload_file"
+    found=1
+    break
+  fi
+  echo "  -> 0 offers with: ${label}; relaxing further..." >&2
+done
+
+if [[ "$found" -ne 1 ]]; then
+  echo "No Vast.ai offers matched for ${name} after the full fallback ladder." >&2
+  echo "Tried (in order): ${ladder_labels[*]}" >&2
+  echo "Base search payload:" >&2
+  jq '.' "$search_payload" >&2
+  exit 1
+fi
 
 jq '[.offers[]] | sort_by(.dph_total) | .[0]' "$offers_response" > "$offer"
 offer_id="$(jq -r '.id // empty' "$offer")"
-
 if [[ -z "$offer_id" || "$offer_id" == "null" ]]; then
-  echo "No Vast.ai offers matched the search payload for ${name}." >&2
-  jq '.' "$search_payload" >&2
+  echo "Search returned offers but no cheapest id could be parsed." >&2
+  jq '.' "$offers_response" >&2
   exit 1
 fi
 
@@ -144,7 +205,8 @@ if [[ "$yes" != "1" ]]; then
   o_dc="$(jq -r '.datacenter // "n/a"' "$offer")"
   o_geo="$(jq -r '.geolocation // .country // "?"' "$offer")"
   img_lbl="${template_image:-$(jq -r '.image // "n/a"' "$create_payload")}"
-  mtype="$(jq -r '.type // "n/a"' "$search_payload")"
+  # Market type of the WINNING search (the ladder may have switched ondemand->bid).
+  mtype="$(jq -r '.type // "n/a"' "$used_payload_file" 2>/dev/null || jq -r '.type // "n/a"' "$search_payload")"
 
   echo "  ── about to rent (Vast.ai offer ${offer_id}) ───────────────────────" >&2
   printf '    label        : %s\n' "$name" >&2

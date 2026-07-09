@@ -59,27 +59,64 @@ extract='{instance_id:.id, status:.actual_status, public_ipaddr:.public_ipaddr, 
 deadline=$(( $(date +%s) + timeout_sec ))
 last=""
 info=""
+# Trap-state fast-fail. Per the Vast docs, actual_status of exited/unknown/offline
+# will NEVER reach 'running' — destroy and retry (i.e. fall through to a fresh
+# rent). 'exited' is also the resting state of a deliberately STOPPED box, so it
+# gets a grace window (the start PUT takes a few poll cycles to flip it to
+# 'loading'); 'offline'/'unknown' are never healthy and fail fast.
+trap_grace_exited=120   # sec stuck in 'exited' after we asked it to run
+trap_grace_other=30     # sec stuck in 'offline'/'unknown'
+stuck_state=""; stuck_since=0
 while true; do
   raw="$(scripts/vast_list_instances_json.sh --id "$instance_id" 2>/dev/null || true)"
   one="$(printf '%s' "$raw" | jq -c '.instances[0] // empty' 2>/dev/null || true)"
   if [[ -n "$one" ]]; then
     info="$(printf '%s' "$one" | jq -c "$extract" 2>/dev/null || true)"
     status="$(printf '%s' "$info" | jq -r '.status // empty' 2>/dev/null || true)"
-    if [[ "$status" == "running" ]]; then
+    port="$(printf '%s' "$info" | jq -r '.ssh_host_port // empty' 2>/dev/null || true)"
+    # Success requires BOTH 'running' AND an assigned ssh port. On a fresh rent
+    # Vast reports status=running before the host port for container 22 is mapped,
+    # so returning on 'running' alone hands the caller an empty ssh_host_port and
+    # the tunnel setup dies. The port usually lands within seconds of 'running'.
+    if [[ "$status" == "running" && -n "$port" && "$port" != "null" ]]; then
       [[ -n "$info_file" ]] && printf '%s\n' "$info" | jq '.' > "$info_file"
       printf '%s\n' "$info"
-      echo "Instance ${instance_id} is running." >&2
+      echo "Instance ${instance_id} is running (ssh port ${port})." >&2
       exit 0
     fi
-    if [[ "$status" != "$last" ]]; then
-      echo "instance ${instance_id} status: ${status:-unknown}; waiting for running..." >&2
-      last="$status"
+    progress="status: ${status:-unknown}"
+    [[ "$status" == "running" ]] && progress="status: running; waiting for ssh port..."
+    if [[ "$progress" != "$last" ]]; then
+      echo "instance ${instance_id} ${progress}" >&2
+      last="$progress"
+    fi
+    # Track how long we've been stuck in a trap state without progress. 'loading'
+    # (or any non-trap state) resets the timer; a persistent trap state past its
+    # grace means the start/rent didn't take — fail fast so the caller can destroy
+    # + re-rent instead of waiting the full timeout.
+    case "$status" in
+      exited)    grace="$trap_grace_exited" ;;
+      offline|unknown) grace="$trap_grace_other" ;;
+      *) grace=0 ;;
+    esac
+    now="$(date +%s)"
+    if [[ "$grace" -gt 0 ]]; then
+      if [[ "$status" != "$stuck_state" ]]; then
+        stuck_state="$status"; stuck_since="$now"
+      elif [[ $(( now - stuck_since )) -ge "$grace" ]]; then
+        echo "Instance ${instance_id} is stuck in '${status}' (a Vast trap state that never reaches 'running')." >&2
+        echo "The start/rent did not take. Destroy it and re-rent a fresh box (run.sh -> 'new', or scripts/deploy.sh)." >&2
+        [[ -n "$info" && -n "$info_file" ]] && printf '%s\n' "$info" > "$info_file"
+        exit 1
+      fi
+    else
+      stuck_state=""; stuck_since=0
     fi
   else
     echo "instance ${instance_id} not found yet (provisioning or API error); retrying..." >&2
   fi
   if [[ $(date +%s) -ge $deadline ]]; then
-    echo "Timed out waiting for instance ${instance_id} to reach 'running' (${timeout_sec}s)." >&2
+    echo "Timed out waiting for instance ${instance_id} to reach 'running' with an ssh port (${timeout_sec}s)." >&2
     [[ -n "$info" && -n "$info_file" ]] && printf '%s\n' "$info" > "$info_file"
     exit 1
   fi

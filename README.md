@@ -57,15 +57,19 @@ CPU VM (this repo cloned here)               Vast.ai GPU box (provisioned)
   4. (optional) deploy-model-repo.sh            :cloud → "ollama signin" once
   5. ssh poll until /api/tags lists models
   6. setup-tunnel.sh <ip> <sshport> <key>            │
-    autossh -L 0.0.0.0:11434:127.0.0.1:11434 ───────▶│  Ollama 127.0.0.1:11434
-  7. test: curl http://127.0.0.1:11434/api/tags     (loopback only, never public)
+    alpine container: autossh -L 0.0.0.0:11434  ────▶│  Ollama 127.0.0.1:11434
+       -> 127.0.0.1:11434   (autossh apk-add'd in   (loopback only, never public)
+                              the container at runtime)
+  7. test: curl http://127.0.0.1:11434/api/tags
 ```
 
 ## Prerequisites (on the CPU VM)
 
 - `terraform` ≥ 1.5
 - `jq`, `curl`
-- `autossh` — `sudo apt install autossh` (Linux) or `brew install autossh` (macOS)
+- `docker` — the tunnel runs as an `alpine:3.20` container that `apk add`s
+  `autossh` at runtime, so **no `autossh` is needed on the host** and nothing
+  is baked into any image (mirrors the Hub repo's `setup-vast-tunnel.sh`)
 - a Vast.ai API key + an SSH key registered with Vast.ai (`ssh_direct` access)
 
 ```bash
@@ -230,7 +234,7 @@ python3 scripts/smoke_test.py --base-url http://127.0.0.1:11434 --model qwen3.6:
 
 ```bash
 source .env
-scripts/deploy.sh --destroy     # terraform destroy + tear down the tunnel unit
+scripts/deploy.sh --destroy     # terraform destroy + tear down the tunnel container
 # or directly:
 terraform destroy -auto-approve -var enable_provisioning=true
 ```
@@ -250,8 +254,8 @@ terraform destroy -auto-approve -var enable_provisioning=true
 | `scripts/list-instances.sh` | List your Vast.ai instances + connect the tunnel to an existing/dormant one |
 | `scripts/deploy-model-repo.sh` | SSH-clone an external model-loading repo onto a running box + run its entrypoint (ships a read-only GitHub deploy key at runtime if private) |
 | `scripts/new-deploy-key.sh` | Generate a read-only GitHub deploy keypair for the GPU repo; prints the public half to paste into GitHub |
-| `scripts/setup-tunnel.sh` | CPU-side autossh tunnel (systemd / launchd) |
-| `scripts/vast_create_instance.sh` / `vast_destroy_instance.sh` | Vast API create/destroy (template search + `/asks/` rent) |
+| `scripts/setup-tunnel.sh` | CPU-side tunnel: `alpine:3.20` container running `autossh -L 0.0.0.0:11434 -> box 127.0.0.1:11434` (autossh installed in the container at runtime — no host autossh, no image bloat) |
+| `scripts/vast_create_instance.sh` / `vast_destroy_instance.sh` | Vast API create/destroy (template search + `/asks/` rent). Create searches `/bundles/` for the cheapest offer and, if the chosen-option search returns 0 offers, auto-relaxes (raise $/hr cap → drop datacenter → broaden GPU names → ondemand→bid) until an offer is found |
 | `scripts/smoke_test.py` | Ollama `/api/tags` + `/api/generate` smoke test |
 
 ## Notes

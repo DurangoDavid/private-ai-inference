@@ -18,6 +18,7 @@ vast_api_url="${VAST_API_URL:-https://console.vast.ai}"
 ssh_key="${PRIVATE_AI_SSH_KEY:-}"
 mode="interactive"   # interactive | list-only | connect
 connect_id=""
+yes=0   # --yes / VAST_CONFIRM_START=1 skips the start-a-stopped-box spend prompt
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,9 +26,11 @@ while [[ $# -gt 0 ]]; do
     --connect) mode="connect"; connect_id="$2"; shift 2 ;;
     --ssh-key) ssh_key="$2"; shift 2 ;;
     --vast-api-url) vast_api_url="$2"; shift 2 ;;
+    --yes) yes=1; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+[[ "${VAST_CONFIRM_START:-0}" == "1" ]] && yes=1
 
 export VAST_API_KEY="${VAST_API_KEY:?VAST_API_KEY must be exported (see .env)}"
 
@@ -95,21 +98,43 @@ if [[ "$status" != "running" ]]; then
   gpu="$(printf '%s' "$chosen_json" | jq -r '.gpu_name // "?"')"
   echo "Instance ${chosen} is not running (status: ${status:-unknown})."
   echo "  Starting it resumes billing at ~${dph} \$/hr (${gpu})."
-  if [[ ! -t 0 ]]; then
-    echo "  Non-interactive run: NOT starting (no spend). Start it manually, then re-run." >&2
+  if [[ "$yes" == "1" ]]; then
+    echo "  --yes/VAST_CONFIRM_START=1 set: starting without prompting." >&2
+  elif [[ ! -t 0 ]]; then
+    echo "  Non-interactive run: NOT starting (no spend). Start it manually then re-run," >&2
+    echo "  or pre-consent: scripts/list-instances.sh --connect ${chosen} --yes (or export VAST_CONFIRM_START=1)." >&2
+    exit 1
+  else
+    read -r -p "  Start it now? [y/N] " start_confirm
+    case "$start_confirm" in
+      y|Y|yes|YES) ;;
+      *) echo "Aborted — nothing started." ; exit 0 ;;
+    esac
+  fi
+  # vast_start_instance.sh execs vast_instance_info.sh, which polls until the
+  # box is running AND has an ssh port assigned, then prints the info JSON to
+  # stdout (progress goes to stderr, shown live). Capture stdout to a temp file
+  # and check the exit code explicitly so a failed start (rejected PUT, or a Vast
+  # trap state) is reported clearly instead of misread as "ip/ssh_port not ready".
+  start_info_file="$(mktemp)"
+  if ! scripts/vast_start_instance.sh --instance-id "$chosen" --vast-api-url "$vast_api_url" > "$start_info_file"; then
+    rm -f "$start_info_file"
+    echo "Failed to start instance ${chosen} — see the messages above (rejected PUT, or a Vast trap state)." >&2
+    echo "If it's stuck in exited/offline, destroy it and re-rent: run.sh -> 'new' (or scripts/deploy.sh)." >&2
     exit 1
   fi
-  read -r -p "  Start it now? [y/N] " start_confirm
-  case "$start_confirm" in
-    y|Y|yes|YES) ;;
-    *) echo "Aborted — nothing started." ; exit 0 ;;
-  esac
-  scripts/vast_start_instance.sh --instance-id "$chosen" --vast-api-url "$vast_api_url"
-  # Re-fetch fresh ip/ssh_port after the start.
-  fresh="$(scripts/vast_list_instances_json.sh --id "$chosen")"
-  chosen_json="$(printf '%s' "$fresh" | jq -c '.instances[0] // empty')"
-  ip="$(printf '%s' "$chosen_json" | jq -r '.public_ipaddr // empty')"
-  ssh_port="$(printf '%s' "$chosen_json" | jq -r '.ssh_host_port // empty')"
+  ip="$(jq -r '.public_ipaddr // empty' "$start_info_file")"
+  ssh_port="$(jq -r '.ssh_host_port // empty' "$start_info_file")"
+  rm -f "$start_info_file"
+  if [[ -z "$ip" || "$ip" == "null" || -z "$ssh_port" || "$ssh_port" == "null" ]]; then
+    for _ in $(seq 1 12); do  # ~1 min extra grace for the port to be mapped
+      fresh="$(scripts/vast_list_instances_json.sh --id "$chosen")"
+      ip="$(printf '%s' "$fresh" | jq -r '.instances[0].public_ipaddr // empty')"
+      ssh_port="$(printf '%s' "$fresh" | jq -r '.instances[0].ssh_host_port // empty')"
+      [[ -n "$ip" && "$ip" != "null" && -n "$ssh_port" && "$ssh_port" != "null" ]] && break
+      sleep 5
+    done
+  fi
   if [[ -z "$ip" || "$ip" == "null" || -z "$ssh_port" || "$ssh_port" == "null" ]]; then
     echo "Instance started but ip/ssh_port not available yet; re-run connect shortly." >&2
     exit 1

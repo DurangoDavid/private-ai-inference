@@ -78,13 +78,17 @@ vast_api_url="${VAST_API_URL:-https://console.vast.ai}"
 # terraform's local-exec) skips its confirm-before-spend prompt. Without this,
 # the create script prompts on a TTY for an explicit y/N against the *real*
 # cheapest offer; a non-TTY run without consent aborts before any spend.
-[[ $confirm_rent -eq 1 ]] && export VAST_CONFIRM_RENT=1
+# It also pre-consents starting a stopped box on the reuse path (also a spend),
+# via VAST_CONFIRM_START (read by list-instances.sh).
+if [[ $confirm_rent -eq 1 ]]; then
+  export VAST_CONFIRM_RENT=1
+  export VAST_CONFIRM_START=1
+fi
 
 # ---- destroy path ----
 if [[ $destroy -eq 1 ]]; then
-  echo ">>> Tearing down: terraform destroy + tunnel unit"
-  systemctl stop private-ai-ollama-tunnel.service 2>/dev/null || true
-  launchctl unload "$HOME/Library/LaunchAgents/com.private-ai-inference.ollama-tunnel.plist" 2>/dev/null || true
+  echo ">>> Tearing down: terraform destroy + tunnel container"
+  docker rm -f private-ai-ollama-tunnel >/dev/null 2>&1 || true
   exec terraform destroy -auto-approve -var enable_provisioning=true
 fi
 
@@ -250,7 +254,7 @@ echo
 echo "=== private-ai-inference ready ==="
 echo "Point the Local LLM Hub CPU VM at:  OLLAMA_BASE_URL=http://127.0.0.1:11434"
 echo "                                    (container: http://host.docker.internal:11434)"
-echo "Tunnel service:  private-ai-ollama-tunnel.service (Linux) / launchd (macOS)"
+echo "Tunnel container:  private-ai-ollama-tunnel  (alpine autossh, docker --restart unless-stopped)"
 terraform output -raw has_cloud 2>/dev/null | grep -q true && \
   echo "Cloud models selected: SSH to root@${ip} -p ${ssh_port} and run 'ollama signin' + 'ollama pull <cloud-model>'."
 echo "Done."
