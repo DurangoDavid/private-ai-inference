@@ -129,6 +129,31 @@ search_offers() {  # $1=payload json  $2=out file ; writes the bundles response
     --data @- > "$2" 2>/dev/null || true
 }
 
+# ---- effective-price normalization (show both, pick cheaper) ----
+# The Vast web UI shows TWO prices the raw dph_total (gross on-demand) hides:
+#   - discounted on-demand: discounted_dph_total / search.discountedTotalPerHour
+#     (= totalHour − discountTotalHour, after discount_rate / credit_discount_max;
+#     typically 5–15% off gross).
+#   - spot/bid: min_bid (interruptible; the web's bid column — often far lower).
+# We annotate every offer with ondemand_disc, spot, best=min(ondemand_disc,spot),
+# gross, disc_pct so selection/sort/display all use the web-comparable effective
+# price. spot is only considered when min_bid is present (null -> on-demand only).
+# The API can only filter on gross dph_total, so the dph_total.lte cap stays a
+# GROSS cap; the effective price paid is always <= that cap (discount/spot lower).
+normalize_offers() {  # $1=in file (bundles response) — rewritten in place with effprice fields
+  local tmp; tmp="$(mktemp)"
+  jq '.offers |= [ .[] | . + {
+    gross: .dph_total,
+    ondemand_disc: (.discounted_dph_total // .search.discountedTotalPerHour // .dph_total),
+    spot: .min_bid,
+    best: ( [ (.discounted_dph_total // .search.discountedTotalPerHour // .dph_total),
+              (.min_bid // 999999) ] | min ),
+    disc_pct: ( if ((.dph_total // 0) | .) > 0
+                then ((1 - (((.discounted_dph_total // .search.discountedTotalPerHour // .dph_total)) / .dph_total)) * 100 | . * 10 | round / 10)
+                else 0 end )
+  } ]' "$1" > "$tmp" && mv -f "$tmp" "$1"
+}
+
 # Build the cumulative relaxation ladder (step 0 = the payload as-given).
 dph_cap="$(printf '%s' "$base_payload" | jq -r '.dph_total.lte // empty')"
 relaxed_cap=""
@@ -179,7 +204,11 @@ if [[ "$found" -ne 1 ]]; then
   exit 1
 fi
 
-jq '[.offers[]] | sort_by(.dph_total) | .[0]' "$offers_response" > "$offer"
+# Annotate the winning offers with effective-price fields, then pick the cheapest
+# by BEST (min of discounted on-demand + spot), not gross dph_total. This makes
+# the curated pick match the Vast web UI's "best price".
+normalize_offers "$offers_response"
+jq '[.offers[]] | sort_by(.best) | .[0]' "$offers_response" > "$offer"
 offer_id="$(jq -r '.id // empty' "$offer")"
 if [[ -z "$offer_id" || "$offer_id" == "null" ]]; then
   echo "Search returned offers but no cheapest id could be parsed." >&2
@@ -195,7 +224,7 @@ printf '%s\n' "$offer_id" > "$offer_id_file"
 # Print one offer (json object) as the rent summary. $1=object json, $2=header
 show_offer() {
   local o="$1" hdr="$2"
-  local gpu ngpu vram ram disk dph rel dc geo
+  local gpu ngpu vram ram disk dph rel dc geo best ods spot gross discp basis
   gpu="$(printf '%s' "$o"  | jq -r '.gpu_name // "n/a"')"
   ngpu="$(printf '%s' "$o" | jq -r '.num_gpus // "?"')"
   vram="$(printf '%s' "$o" | jq -r '.gpu_ram  // 0' | awk '{printf "%.0f", $1/1024}')"
@@ -205,11 +234,27 @@ show_offer() {
   rel="$(printf '%s' "$o"  | jq -r '.reliability // "?"')"
   dc="$(printf '%s' "$o"   | jq -r '.datacenter // "n/a"')"
   geo="$(printf '%s' "$o"  | jq -r '.geolocation // .country // "?"')"
+  # Effective-price fields (added by normalize_offers; fall back to gross if absent).
+  best="$(printf '%s' "$o"  | jq -r '.best // .dph_total // 0' | awk '{printf "%.3f", $1}')"
+  ods="$(printf '%s' "$o"   | jq -r '.ondemand_disc // .dph_total // 0' | awk '{printf "%.3f", $1}')"
+  spot="$(printf '%s' "$o"  | jq -r 'if .spot == null then "—" else (.spot | tostring) end')"
+  gross="$(printf '%s' "$o" | jq -r '.gross // .dph_total // 0' | awk '{printf "%.3f", $1}')"
+  discp="$(printf '%s' "$o" | jq -r '.disc_pct // 0' | awk '{printf "%.1f", $1}')"
+  # Which basis won the min() — shows the operator what they're actually paying.
+  basis="$(printf '%s' "$o" | jq -r 'if (.spot // null) != null and (.spot <= (.ondemand_disc // .dph_total)) then "spot/bid (interruptible)" else "on-demand (discounted)" end')"
   echo "  ── ${hdr} ────────────────────────────────────────────────" >&2
   printf '    GPU          : %s × %s  (%s GB VRAM)\n' "$ngpu" "$gpu" "$vram" >&2
   printf '    host RAM     : %s GB\n' "$ram" >&2
   printf '    disk         : %s GB\n' "$disk" >&2
-  printf '    $/hour (dph) : %s   reliability: %s   datacenter: %s   geo: %s\n' "$dph" "$rel" "$dc" "$geo" >&2
+  printf '    $/hour       : %s  (effective: %s)\n' "$dph" "$best" >&2
+  printf '      on-demand  : $%s/hr discounted (gross $%s, %s%% off)\n' "$ods" "$gross" "$discp" >&2
+  if [[ "$spot" == "—" ]]; then
+    printf '      spot/bid   : (none offered)\n' >&2
+  else
+    printf '      spot/bid   : $%s/hr (interruptible)\n' "$spot" >&2
+  fi
+  printf '      basis      : %s\n' "$basis" >&2
+  printf '    reliability  : %s   datacenter: %s   geo: %s\n' "$rel" "$dc" "$geo" >&2
 }
 
 # Browse the whole suitable market, cheapest-first, paginated, and let the human
@@ -227,23 +272,25 @@ browse_and_pick() {
   echo "  pick one with RAM >= your largest model (~22 GB+) or the pull may fail." >&2
   broad_resp="$state_dir/offers_browse.json"
   search_offers "$broad" "$broad_resp"
+  normalize_offers "$broad_resp"
   bn="$(jq '(.offers // []) | length' "$broad_resp" 2>/dev/null || echo 0)"
   if [[ "$bn" -eq 0 ]]; then
     echo "  No offers even with the prefs relaxed; staying on the curated pick." >&2
     return 1
   fi
   sorted="$state_dir/offers_sorted.json"
-  jq '[.offers[] | {id, gpu_name, num_gpus, gpu_ram, cpu_ram, disk_space, dph_total, reliability, datacenter, country:(.geolocation//.country//"?")}] | sort_by(.dph_total)' "$broad_resp" > "$sorted"
+  jq '[.offers[] | {id, gpu_name, num_gpus, gpu_ram, cpu_ram, disk_space, dph_total, ondemand_disc, spot, best, reliability, datacenter, country:(.geolocation//.country//"?")}] | sort_by(.best)' "$broad_resp" > "$sorted"
   total="$(jq 'length' "$sorted")"
   pages=$(( (total + 9) / 10 ))
-  echo "  ${total} offers, cheapest-first, 10 per page." >&2
+  echo "  ${total} offers, cheapest-first by EFFECTIVE price (min of on-demand-disc + spot), 10 per page." >&2
   per=10; page=0; picked=""
   while true; do
     lo=$((page*per)); hi=$((lo+per-1)); (( hi >= total )) && hi=$((total-1))
     echo "  ── page $((page+1))/${pages} — offers #${lo+1}–#${hi+1} of ${total} ──" >&2
     jq -r --argjson lo "$lo" --argjson hi "$hi" '
+      def f2: (. * 100 | round | . / 100 | tostring);
       .[($lo):($hi+1)] | to_entries[] |
-      "  #\(.key+$lo+1)  offer \(.value.id)  \(.value.gpu_name) × \(.value.num_gpus)  \(.value.gpu_ram | . / 1024 + 0.5 | floor)GB VRAM  \(.value.cpu_ram | . / 1024 + 0.5 | floor)GB RAM  \(.value.disk_space)GB disk  $\(.value.dph_total | . * 100 | round | . / 100)/hr  rel=\(.value.reliability)  dc=\(.value.datacenter)  \(.value.country)"
+      "  #\(.key+$lo+1)  offer \(.value.id)  \(.value.gpu_name) × \(.value.num_gpus)  \(.value.gpu_ram | . / 1024 + 0.5 | floor)GB VRAM  \(.value.cpu_ram | . / 1024 + 0.5 | floor)GB RAM  \(.value.disk_space)GB disk  best=$\(.value.best|f2)/hr  ondem=$\(.value.ondemand_disc|f2)  spot=\(if .value.spot == null then "—" else ("$" + (.value.spot|f2)) end)  rel=\(.value.reliability)  dc=\(.value.datacenter)  \(.value.country)"
     ' "$sorted" >&2
     echo "  (pick #  ·  n=next  ·  p=prev  ·  q=quit browse)" >&2
     read -r -p "  > " pick
@@ -282,9 +329,12 @@ if [[ "$yes" != "1" ]]; then
   mtype="$(jq -r '.type // "n/a"' "$used_payload_file" 2>/dev/null || jq -r '.type // "n/a"' "$search_payload")"
   show_offer "$(cat "$offer")" "about to rent (Vast.ai offer ${offer_id}) — cheapest match"
   printf '    label        : %s\n    image        : %s\n    market type  : %s   (ondemand=stable, bid=interruptible/cheapest, reserved)\n' "$name" "$img_lbl" "$mtype" >&2
+  if [[ -n "$dph_cap" && "$dph_cap" != "null" ]]; then
+    printf '    $/hr cap     : %s (GROSS dph_total — the API can only filter gross;\n                    the EFFECTIVE price paid is at or below this due to discount/spot)\n' "$dph_cap" >&2
+  fi
   echo "  ─────────────────────────────────────────────────────────────────" >&2
-  echo "  next-cheapest curated matches (for sanity-check):" >&2
-  jq -r '.offers | sort_by(.dph_total) | .[1:3][] | "    offer \(.id): \(.gpu_name) × \(.num_gpus) @ \(.dph_total) $/hr"' "$offers_response" >&2 || true
+  echo "  next-cheapest curated matches (for sanity-check, by effective price):" >&2
+  jq -r '.offers | sort_by(.best) | .[1:3][] | "    offer \(.id): \(.gpu_name) × \(.num_gpus)  best=$\(.best|(. * 100|round/100))  ondem=$\(.ondemand_disc|(. * 100|round/100))  spot=\(if .spot == null then "—" else ("$" + (.spot|(. * 100|round/100|tostring))) end)"' "$offers_response" >&2 || true
   echo >&2
 
   if [[ ! -t 0 ]]; then

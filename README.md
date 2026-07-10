@@ -81,6 +81,26 @@ cp .env.example .env
 
 ## Quick start (end-to-end)
 
+**Step-by-step (fresh install on the CPU VM):**
+
+1. Install prerequisites: `terraform ≥ 1.5`, `jq`, `curl`, `docker`.
+2. `cp .env.example .env` and edit `.env`: set `VAST_API_KEY` (your Vast.ai API
+   key) and `PRIVATE_AI_SSH_KEY` (path to your Vast-registered SSH key).
+3. `source .env` (so `VAST_API_KEY` is exported — never logged, never committed).
+4. `scripts/deploy.sh` — interactive model pick → render-only `terraform apply`
+   → rent (with a `y/N` confirm-before-spend gate against the real cheapest
+   offer) → wait for `running` + Ollama → stand up the SSH tunnel → smoke test.
+5. Copy the printed `OLLAMA_BASE_URL` into the CPU app's `.env`
+   (`http://host.docker.internal:11434` in a container) and recreate the app
+   container (a `.env` change needs a recreate, not just `docker restart`).
+6. (Optional, for `:cloud` models) SSH into the box once and run `ollama signin`,
+   then `ollama pull <cloud-model>` for each — a one-time manual approval.
+7. (Recommended) Enable the CPU-side Vast watcher so future GPU swaps reconnect
+   automatically: `sudo systemctl enable --now private-ai-vast-watcher` (see the
+   [private-ai](../private-ai) CPU repo). Tag the box `private-ai-gpu`
+   (Vast console, or `TF_VAR_deployment_name=private-ai-gpu`) so the watcher
+   selects it.
+
 ```bash
 source .env
 scripts/deploy.sh                       # interactive model pick + full flow
@@ -122,6 +142,33 @@ that still fits the models, sorted cheapest-first (10/page): pick one by number
 (`n`/`p` to page, `q` to bail). 24 GB cards stay excluded — they can't hold a
 22 GB model; that's the `gpu_ram` floor, not a missing option. If the curated
 cheapest is already fine, just answer `y`.
+
+### Pricing — "best price" matches the Vast web UI
+
+The rent gate and browse sort by the **effective price**, not gross on-demand
+`dph_total`, so the number you see matches the Vast web UI. For every offer,
+`vast_create_instance.sh` computes:
+
+- **gross** = `dph_total` (the on-demand list price — the only field the Vast API
+  can server-side filter on, so `max_dollars_per_hour` stays a **gross** cap).
+- **on-demand discounted** = `discounted_dph_total` (aka
+  `search.discountedTotalPerHour`) — after `discount_rate` /
+  `credit_discount_max`, typically 5–15% off gross. This is the web's on-demand
+  column.
+- **spot/bid** = `min_bid` — interruptible, the web's bid column; often far lower.
+- **best** = `min(on-demand discounted, spot)` — the truly cheapest basis wins.
+
+The curated pick and the browse list **sort by `best`** and **show both** prices
+side by side (`best` / `ondem` / `spot` per row), plus gross + discount % in the
+rent summary. A spot offer cheaper than its on-demand price is selected when it
+wins `min(...)`. `market_type=bid` makes spot the basis; `ondemand` uses the
+discounted on-demand price. Because discount/spot only **lower** the price, the
+effective price paid is always **≤** the gross `max_dollars_per_hour` cap.
+
+> The **VRAM 1.25× sizing math** (`min_vram = clamp(1.25 × largest local model,
+> 48, 250)`) and the **`disk_gb`** floor are unchanged — pricing is a display +
+> selection change only. Disk defaults to 200 GB (≥125 GB holds the local fleet;
+> 1250 GB is the aspirational target, set `disk_gb` higher if you want it).
 
 Then on the Hub CPU VM (or same box), set:
 
@@ -260,6 +307,64 @@ scripts/deploy.sh --no-provision --ssh-key ~/.ssh/vast_ed25519
 
 `OLLAMA_BASE_URL` on the Hub never moves — that's the swap guarantee.
 
+## Dynamic Vast GPU watcher (CPU discovers the GPU via the Vast API)
+
+This repo ships the **reusable, public** half of automatic GPU discovery. The
+**live loop** runs on the CPU VM as a service (see the
+[private-ai](../private-ai) repo's `scripts/watch-vast-gpu.sh` +
+`private-ai-vast-watcher.service`); these scripts are the building blocks the
+CPU watcher and operators share. **No GPU→CPU heartbeat is required** — the CPU
+polls the Vast API, SSH-tests the box, and reconnects the tunnel when the active
+GPU's host/port changes.
+
+**This is a public orchestration/provisioning repo.** No API keys, private keys,
+customer data, or secrets belong here. `VAST_API_KEY` lives **only on the CPU
+box** (or your operator workstation), read from env, never logged, never
+committed. `.env` is gitignored; `examples/private-ai-inference.env.example` is
+the tracked template.
+
+### Tag your Vast instance as `private-ai-gpu`
+
+The watcher selects running instances whose `label` OR `image_uuid` contains
+`VAST_INSTANCE_LABEL` (default `private-ai-gpu`). Terraform labels a freshly
+provisioned box `<deployment_name>-NN`, so exporting
+`TF_VAR_deployment_name=private-ai-gpu` (the `provision-vast-ollama.sh` default)
+tags it automatically. You can also set the label in the Vast.ai console, or —
+for a hand-rented, untagged box — set `VAST_INSTANCE_MATCH_ANY=1` on the CPU
+watcher to grab the account's single running GPU (OFF by default, so only
+explicitly-tagged boxes are selected).
+
+### Scripts
+
+| Script | What it does |
+|---|---|
+| `scripts/vast-list-instances.sh` | Non-interactive list of your instances (`--running`, `--label`, `--json`). |
+| `scripts/vast-pick-active-gpu.sh` | Pick the best RUNNING tagged instance (reliability→VRAM→$/hr). `--json` / `--dry-run` / `--match-any`. |
+| `scripts/vast-render-fix-command.sh` | Render the suggested `fix.sh` / `reconnect-gpu-tunnel.sh` command for a record. No network. |
+| `scripts/vast-watch.sh` | One-shot entry point: fetch→filter→pick→print (`--dry-run` for the operator block). |
+| `scripts/provision-vast-ollama.sh` | Rent a fresh GPU pre-tagged `private-ai-gpu` (forwards to `deploy.sh` with `TF_VAR_deployment_name`). |
+
+### Dry run
+
+```bash
+set -a; . .env; set +a
+./scripts/vast-watch.sh --dry-run
+# selected instance: 44370095
+# host: 75.26.236.5
+# ssh_port: 40897
+# gpu: RTX PRO 6000 WS
+# vram: 95.6 GB
+# status: running
+# suggested fix command:
+#   sudo sh scripts/fix.sh --gpu-host 75.26.236.5 --gpu-ssh-port 40897 --key /root/.ssh/vast_ed25519 --customer david
+```
+
+No candidate → a clear `no running instance matching 'private-ai-gpu'` line and
+exit 0 (not an error — an `exited`/untagged box is correctly skipped). The live
+CPU loop, state files (`/data/inference/*`), the status endpoint
+(`/api/inference/gpu/status`), and the systemd unit all live in the
+**private-ai** CPU repo; this repo only provides the reusable discovery logic.
+
 ## Smoke test through the tunnel
 
 ```bash
@@ -281,11 +386,26 @@ scripts/deploy.sh --destroy --ssh-key ~/.ssh/vast_ed25519   # Vast instance + tu
 terraform destroy -auto-approve -var enable_provisioning=false
 ```
 
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `VAST_API_KEY must be exported` | `source .env` (or `set -a; . .env; set +a`) before any `scripts/` call. The key is read from env only — never logged, never committed. |
+| `No Vast.ai offers matched ... after the full fallback ladder` | Every box on the market fails your floors. Raise `max_dollars_per_hour`, lower `min_vram_floor_gb`, or set `secure_datacenter_only = false`. The ladder already auto-relaxes cap → datacenter → GPU-name → ondemand→bid; if it still finds nothing, the market genuinely has no box that fits. |
+| Rent prompt shows `Non-interactive run with no --yes/VAST_CONFIRM_RENT=1: NOT renting` | You piped stdin / ran unattended. Re-run in a TTY, or `scripts/deploy.sh --confirm-rent` (or `export VAST_CONFIRM_RENT=1`) to consent non-interactively **after** you've reviewed the offer. |
+| Cheapest pick is a **spot/bid** box (interruptible) | Expected when spot wins `min(on-demand disc, spot)`. The rent summary prints `basis: spot/bid (interruptible)`. If you need stability, answer `b` to browse and pick an on-demand box, or set `market_type = "ondemand"`. |
+| Price shown is **higher** than the web UI | You're reading the **gross** `$/hour` line, not the **effective** one. The summary prints both: `$/hour: <gross> (effective: <best>)` plus the on-demand-discounted + spot breakdown. The web UI's number is the effective one. |
+| `No Vast.ai template found for image` | `use_ollama_template = true` but no template matches `ollama_template_image`. Set `use_ollama_template = false` (bare CUDA image + onstart install), or pick a template image Vast actually catalogs. |
+| Instance rented but `/api/tags` never lists models | The onstart is still pulling (big models take minutes). `scripts/vast_instance_info.sh` polls until `running`; then SSH in: `ollama ps`. For `:cloud` models, SSH in once and run `ollama signin`, then `ollama pull <cloud-model>`. |
+| Tunnel up but `curl 127.0.0.1:11434/api/tags` empty / connection refused | The box's Ollama isn't on `127.0.0.1:11434` (a stock template binds `0.0.0.0:21434`). Template mode overrides `OLLAMA_HOST=127.0.0.1:11434` in the create `env`; if you hand-rented, re-rent via `deploy.sh` or set the env yourself. Also confirm the box actually ran the onstart. |
+| Watcher (CPU repo) reports `no running instance matching 'private-ai-gpu'` | Your box is `exited` or untagged. Start it, tag it `private-ai-gpu` (Vast console label, or `TF_VAR_deployment_name=private-ai-gpu` via `provision-vast-ollama.sh`), or set `VAST_INSTANCE_MATCH_ANY=1` on the CPU watcher. An `exited`/untagged box is correctly **skipped** — the watcher never tunnels to a down box. |
+| `deploy-model-repo.sh` can't clone the private GPU repo | The read-only GitHub deploy key isn't added to `github.com/.../private-ai-gpu → Settings → Deploy keys`, or `PRIVATE_AI_GPU_DEPLOY_KEY` points at the wrong path. Re-run `scripts/new-deploy-key.sh`, paste the **public** half into GitHub, keep the **private** half in a gitignored file. Never commit the private key. |
+
 ## Files
 
 | Path | Purpose |
 |------|---------|
-| `locals.tf` | Fleet catalog (`model_catalog`) + 1.25× sizing logic |
+| `locals.tf` | Fleet catalog (`model_catalog`) + 1.25× sizing logic (unchanged — pricing is display/selection only) |
 | `variables.tf` | `selected_models` (multi-select), sizing + Vast search vars |
 | `main.tf` | One render-only inference node (terraform never rents; `deploy.sh` rents in its own TTY) |
 | `modules/vast_inference_node/` | Vast search → create payload rendering (no `null_resource`; rent/destroy via `scripts/`) |

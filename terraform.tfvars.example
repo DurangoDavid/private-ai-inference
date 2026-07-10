@@ -28,6 +28,14 @@ max_dollars_per_hour   = 20
 min_reliability        = 0.99
 secure_datacenter_only = true
 
+# PRICING NOTE: max_dollars_per_hour is a cap on GROSS on-demand dph_total — the
+# only price field the Vast API can server-side filter on. The price you ACTUALLY
+# pay is the EFFECTIVE price: min(discounted on-demand, spot min_bid), shown
+# side-by-side by vast_create_instance.sh (matching the Vast web UI). The
+# effective price is always <= this gross cap (discount/spot only lower it).
+# Selection sorts by effective price, so the cheapest BASIS (on-demand-discounted
+# OR spot) wins. market_type=bid makes spot the basis; ondemand uses discounted.
+
 # Provisioning mode. Default: rent the cheapest offer that has an Ollama
 # template (Ollama preinstalled); onstart only serves + pulls. Set
 # use_ollama_template = false to rent a bare CUDA image and install Ollama from
