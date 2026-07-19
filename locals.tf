@@ -1,9 +1,9 @@
 locals {
   # ---------------------------------------------------------------------------
-  # Fleet catalog — the Local LLM Hub (README1.md) GPU fleet, encoded as data.
+  # Fleet catalog — the Local LLM Hub (private-ai CPU repo) GPU fleet, encoded as data.
   # This catalog is the alignment seam between this provisioner and the CPU VM
   # app's fleet: a model is added/removed here + pulled on the box, no app-side
-  # code change (README1.md's "nothing static" rule for the GPU box).
+  # code change (the private-ai CPU repo's "nothing static" rule for the GPU box).
   #
   # Every entry has the SAME attribute shape (Terraform map values must share a
   # type) — use [] / false as the empty value, never omit an attribute.
@@ -13,11 +13,11 @@ locals {
   #              VRAM => EXCLUDED from VRAM sizing (weight_gb ignored when cloud).
   # weight_gb   : best-effort GB footprint of the Ollama default-pull for the
   #              LARGEST selected local model drives min VRAM (×1.25). Several
-  #              fleet names are forward-looking/aspirational (per README1.md);
-  #              treat these as tuning constants — verify on a real box with
-  #              `ollama show` and adjust here.
-  # role        : README1.md routing_role tag (documentation / future filtering).
-  # vision      : README1.md vision flag (documentation / future filtering).
+  #              fleet names are forward-looking/aspirational (per the private-ai
+  #              CPU repo); treat these as tuning constants — verify on a real
+  #              box with `ollama show` and adjust here.
+  # role        : private-ai CPU repo routing_role tag (documentation / future filtering).
+  # vision      : private-ai CPU repo vision flag (documentation / future filtering).
   # gpu_names   : preferred Vast.ai GPU offers for this model; empty => use the
   #              var.default_gpu_names broad list.
   # ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ locals {
     }
   }
 
-  # ----- selection + sizing (README1.md spec) -----
+  # ----- selection + sizing (private-ai CPU repo spec) -----
   # min VRAM = clamp(1.25 × the weight GB of the LARGEST selected LOCAL model,
   #                  floor=var.min_vram_floor_gb, ceiling=var.max_vram_ceiling_gb).
   # :cloud models are excluded (served from Ollama cloud, ~0 local VRAM).

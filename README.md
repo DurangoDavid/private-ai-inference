@@ -8,7 +8,7 @@ A Terraform + bash runner that rents a **Vast.ai** GPU box that already has
 **Ollama** on it, pulls the models you choose (or delegates that to a repo you
 supply), and wires it back to your CPU VM over an SSH tunnel — so the box
 becomes the swappable GPU inference backend for the
-[Local LLM Hub](./README1.md) CPU VM.
+[Local LLM Hub (private-ai)](https://github.com/DurangoDavid/private-ai) CPU VM.
 
 By default it rents the **cheapest offer that has an Ollama template**
 (Vast.ai's official prebuilt Ollama image, found via `/api/v0/template/`) rather
@@ -26,8 +26,9 @@ exactly the way the Hub already expects: `OLLAMA_BASE_URL=http://127.0.0.1:11434
 on the box. **No app-side change required.** Even in template mode we override
 `OLLAMA_HOST` to loopback so Ollama is never published to the public internet.
 
-This is the Vast.ai implementation of the Hub's swappable-GPU role (README1.md
-names Vast.ai as the example host). Swap the box by re-running the deploy.
+This is the Vast.ai implementation of the Hub's swappable-GPU role (the
+private-ai CPU repo names Vast.ai as the example host). Swap the box by
+re-running the deploy.
 
 ## How it sizes
 
@@ -438,22 +439,13 @@ terraform destroy -auto-approve -var enable_provisioning=false
   pull the selected fleet models directly in the onstart.
 - `weight_gb` values in `locals.tf` are best-effort estimates of the Ollama
   default-pull footprint; several fleet names are forward-looking/aspirational
-  (per README1.md). Treat them as tuning constants — verify on a real box with
+  (per the private-ai CPU repo's fleet spec). Treat them as tuning constants — verify on a real box with
   `ollama show` and adjust in `locals.tf`. The structure (`cloud` + `weight_gb`)
   is the load-bearing part.
 - Ollama runs loopback-only on the box (`127.0.0.1:11434`, refuses `0.0.0.0`)
   and is reached only over the SSH tunnel — never published to the public
   internet. This matches the Hub's security posture.
-- The cover avatar (`docs/cover/`) and `docs/runtime/` images are leftovers from
-  the repo's prior vLLM profile and may be swapped.
-
-## Repository rename
-
-This repo was previously `vast-coding-llm`. To finish the rename on GitHub:
-
-```bash
-gh repo rename private-ai-inference
-git remote set-url origin https://github.com/<you>/private-ai-inference.git
-```
+- The cover avatar (`docs/cover/vast-coding-llm-avatar.png`) is the README
+  banner; its filename still carries the repo's prior name and may be renamed.
 
 Open source — keep it that way.

@@ -39,7 +39,7 @@ locals {
   # `image` is the CUDA base and the onstart installs Ollama. `env` always pins
   # OLLAMA_HOST to loopback — the template's default 0.0.0.0:21434 would publish
   # Ollama; our value wins the env merge so the published port is a dead map and
-  # we reach Ollama only over the SSH tunnel (README1.md "refuses 0.0.0.0").
+  # we reach Ollama only over the SSH tunnel (private-ai CPU repo "refuses 0.0.0.0").
   create_payload = {
     image   = var.use_ollama_template ? var.ollama_template_image : var.docker_image
     label   = var.name

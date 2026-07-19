@@ -8,7 +8,7 @@
 # Forwards the CPU host's 0.0.0.0:11434 -> <host>:127.0.0.1:11434 (Ollama on the
 # box is loopback-only). The app/gateway then points OLLAMA_BASE_URL at
 # http://127.0.0.1:11434 (bare metal) or http://host.docker.internal:11434
-# (in a container) — the same value README1.md's setup-vast-tunnel.sh produces,
+# (in a container) — the same value the private-ai CPU repo's setup-vast-tunnel.sh produces,
 # so no app-side change is needed.
 #
 # The tunnel runs in an `alpine:3.20` container that `apk add`s openssh-client +

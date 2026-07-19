@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Vast.ai containers have no systemd — run `ollama serve` directly, loopback only.
 # The CPU VM reaches this box over an SSH tunnel (autossh -L 0.0.0.0:11434 ->
-# 127.0.0.1:11434), mirroring README1.md's "binds 127.0.0.1:11434, refuses 0.0.0.0"
+# 127.0.0.1:11434), mirroring the private-ai CPU repo's "binds 127.0.0.1:11434, refuses 0.0.0.0"
 # GPU-box posture. Never publish 11434 to the public internet.
 mkdir -p /workspace/logs
 export OLLAMA_HOST=127.0.0.1:11434
